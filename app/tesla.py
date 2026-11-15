@@ -322,12 +322,16 @@ def _err(e: BaseException) -> CarError:
 
 
 async def list_vehicles() -> list[dict[str, Any]]:
+    """Cars on the Tesla account. Uses GET /api/1/products (the library has no account-level
+    vehicles.list(); that method lives on a single-car object). Energy products have no VIN."""
     try:
-        resp = await _with_api(lambda api: api.vehicles.list())
+        resp = await _with_api(lambda api: api.products())
     except TeslaFleetError as e:
         raise _err(e) from None
     out = []
-    for v in resp.get("response", []):
+    for v in resp.get("response", []) or []:
+        if not isinstance(v, dict) or not v.get("vin"):
+            continue  # Powerwall / solar entries
         out.append(
             {
                 "vin": v.get("vin"),
@@ -383,6 +387,9 @@ async def key_paired(vin: str | None = None) -> bool | None:
         vin = await resolve_vin(vin)
         resp = await _with_api(lambda api: api.vehicles.createFleet(vin).fleet_status([vin]))
     except (TeslaFleetError, CarError, NotConnected):
+        return None
+    except Exception:  # never take the owner page down over a status check
+        log.exception("Key pairing check failed")
         return None
     r = resp.get("response", {})
     if vin in (r.get("key_paired_vins") or []):

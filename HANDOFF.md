@@ -38,6 +38,9 @@ Update this file **in the same commit as every change**: change log, decisions, 
     page, security buttons).
   - `app/crypt.py` — Fernet encryption (key from SECRET_KEY) for the Tesla tokens and car key.
 - Tesla's library errors subclass **BaseException**, not Exception: catch `TeslaFleetError`.
+- tesla-fleet-api 1.23.1 (pinned): the car list is `api.products()` (GET /api/1/products, filter
+  entries with a `vin`). `api.vehicles` only has createFleet/createSigned; there is no
+  `api.vehicles.list()`.
 
 ### Endpoints
 - `/` owner page (password = OWNER_PASSWORD). `/auth/login` + `/auth/callback` Tesla sign-in.
@@ -75,7 +78,10 @@ payment method and a billing limit above $0 (default $0 disables the app).
   approvals, owner pages, headers, cross-site POSTs, VIN check, host check, disconnect,
   app-wide password cap and the owner clearing it; run it on a fresh DB). Add `DATABASE_URL=postgresql://...`
   to test the Postgres path. `python tests/fake_tesla.py` checks the Tesla side against a fake
-  Fleet API (token refresh, wake, refusals, signed switch, window location, encryption).
+  Fleet API (token refresh, wake, refusals, signed switch, window location, encryption, car list
+  and VIN lookup with no TESLA_VIN). `python tests/test_library_api.py` checks every Tesla library
+  call the app makes against the real installed tesla-fleet-api (method exists, arguments fit).
+  Run all three before every push.
 - Ship: push `main`; Render auto-deploys. Service buddy-ev-monitor (srv-dbsvma7f3r2c73bh1q8g),
   MY APPS workspace, free plan, https://buddy-ev-monitor-gk37.onrender.com (created 2026-11-15
   via the Render API, so render.yaml isn't applied: health check path and SECRET_KEY generate
@@ -137,6 +143,12 @@ payment method and a billing limit above $0 (default $0 disables the app).
 - 2026-11-15 — Steve chose Supabase: free project buddy-ev-monitor (ref mpnvxhpcxzdpxvuhobuw,
   us-east-2) created by the main chat. The app creates its own table `bem_kv` (with RLS and
   revokes) on startup, so nothing has to be created in Supabase by hand.
+
+- 2026-11-15 — Live bug after Steve's first Tesla sign-in: home page 503 with AttributeError
+  ('Vehicles' object has no attribute 'list'). The car list now uses `api.products()`; the home
+  page shows a note instead of failing if the car check errors; approvals catch Tesla errors from
+  the VIN lookup; new tests/test_library_api.py and fake-Tesla checks would have caught it
+  (tests had always set TESLA_VIN, which skipped the car list).
 
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,

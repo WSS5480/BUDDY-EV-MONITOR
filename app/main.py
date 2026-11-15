@@ -198,6 +198,8 @@ async def _approval(action: str, vin: str | None, approval_id: str, what: str) -
         real_vin = await tesla.resolve_vin(vin)
     except (tesla.NotConnected, tesla.CarError) as e:
         return str(e)
+    except tesla.TeslaFleetError as e:  # BaseException subclass
+        return str(tesla._err(e))
     except Exception as e:
         log.exception("Approval step failed")
         return f"Something went wrong on the app's side ({e.__class__.__name__}). Nothing was done."
@@ -416,7 +418,13 @@ async def _home(request: Request) -> Response:
     if not await _is_owner(request):
         return HTMLResponse(pages.login_page(locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length(), msg=msg))
     connected = await tesla.is_connected()
-    paired = await tesla.key_paired() if connected else None
+    paired = None
+    if connected:
+        try:
+            paired = await tesla.key_paired()
+        except (Exception, tesla.TeslaFleetError):  # TeslaFleetError is a BaseException; page must still load
+            log.exception("Car check on the home page failed")
+            msg = msg or "Couldn't check the car with Tesla just now. The rest of the page works."
     return HTMLResponse(
         pages.dashboard(
             missing=config.missing_settings(),

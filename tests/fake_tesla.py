@@ -3,7 +3,8 @@
 Run: python tests/fake_tesla.py
 Covers: early-rejected access token is refreshed once, sleeping car is woken, a refusal is
 reported, a plain REST call refused for "command protocol" switches to signed commands, window
-commands send the car's location, tokens and key are stored encrypted.
+commands send the car's location, tokens and key are stored encrypted, the car list and VIN
+lookup work with no TESLA_VIN set.
 """
 
 import asyncio
@@ -39,6 +40,11 @@ async def handler(req: web.Request) -> web.Response:
     calls.append(p)
     if req.headers.get("Authorization") == "Bearer stale":
         return web.json_response({"error": "token expired (401)"}, status=401)
+    if p == "/api/1/products":
+        return web.json_response({"response": [{"energy_site_id": 1, "resource_type": "battery"},
+                                               {"id": 9, "vin": "5YJ3E1EA7KF000001", "display_name": "Buddy", "state": "online"}]})
+    if p == "/api/1/vehicles" or p.endswith("/vehicles/list"):
+        return web.json_response({"error": "wrong endpoint"}, status=404)
     if p.endswith("fleet_status"):
         return web.json_response({"response": {"key_paired_vins": ["VIN1"], "unpaired_vins": [],
                                                "vehicle_info": {"VIN1": {"vehicle_command_protocol_required": False}}}})
@@ -104,6 +110,16 @@ async def main():
     except BaseException as e:  # the fake can't speak the signed protocol; we only check the switch
         print("   (signed call against fake ended with", type(e).__name__, ")")
     check("REST refusal switches the car to signed commands", (await store.get(tesla.K_PROTOCOL + "VIN1"))["signed"] is True)
+
+    # no TESLA_VIN: the app finds the car itself (this is the path that broke live)
+    config.TESLA_VIN = ""
+    cars = await tesla.list_vehicles()
+    check("car list read from /api/1/products, energy products skipped",
+          cars == [{"vin": "5YJ3E1EA7KF000001", "name": "Buddy", "state": "online"}], str(cars))
+    await store.delete(tesla.K_VIN)
+    check("VIN found without TESLA_VIN", await tesla.resolve_vin(None) == "5YJ3E1EA7KF000001")
+    paired = await tesla.key_paired()
+    check("key pairing check runs end to end (returns a value, no crash)", paired in (True, False, None), str(paired))
 
     await tesla.shutdown()
     await store.close()
