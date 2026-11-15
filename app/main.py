@@ -33,6 +33,8 @@ K_APPROVAL = "approval:"
 # Fixed notices for the owner page (?m=key), so a link can't make the page show arbitrary text.
 MSGS = {
     "wrong_password": "Wrong password.",
+    "signin_paused": "Sign-in is paused for up to an hour after too many wrong tries.",
+    "pause_cleared": "Sign-in pause cleared.",
     "need_tesla_settings": "Add TESLA_CLIENT_ID and TESLA_CLIENT_SECRET in Render first.",
     "tesla_expired": "Tesla sign-in expired. Try again.",
     "tesla_cancelled": "Tesla sign-in was cancelled.",
@@ -63,12 +65,14 @@ def _safe_next(value: str) -> str:
 
 def _ip(request: Request) -> str:
     """Best guess at the visitor's address for the per-address lockout. Render sits behind
-    Cloudflare, which sets CF-Connecting-IP; otherwise the first X-Forwarded-For entry, otherwise
-    the socket. Only well-formed addresses count, and IPv6 is grouped by /64 (one home or server
-    gets a whole /64). Faking it only dodges the per-address count; the app-wide cap still holds."""
+    Cloudflare, which sets CF-Connecting-IP. Otherwise the LAST X-Forwarded-For entry (Render's
+    proxy appends the real address; earlier entries are whatever the visitor sent), otherwise the
+    socket. Only well-formed addresses count; IPv4-mapped IPv6 counts as the IPv4 address and other
+    IPv6 is grouped by /64 (one home or server gets a whole /64). Faking it only dodges the
+    per-address count; the app-wide cap still holds."""
     h = request.headers
     candidates = [h.get("cf-connecting-ip", "")]
-    candidates.append(h.get("x-forwarded-for", "").split(",")[0])
+    candidates.append(h.get("x-forwarded-for", "").split(",")[-1])
     candidates.append(request.client.host if request.client else "")
     for raw in candidates:
         raw = raw.strip()[:64]
@@ -76,6 +80,8 @@ def _ip(request: Request) -> str:
             ip = ipaddress.ip_address(raw)
         except ValueError:
             continue
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         if ip.version == 6:
             return str(ipaddress.ip_network(f"{ip}/64", strict=False))
         return str(ip)
@@ -431,6 +437,10 @@ async def login(request: Request) -> Response:
         return _blocked()
     form = await request.form()
     nxt = _safe_next(str(form.get("next", "")))
+    if await auth.locked_out(_ip(request)):
+        if nxt != "/":
+            return RedirectResponse(f"{nxt}&m=signin_paused", status_code=303)
+        return _go("signin_paused")
     if await auth.check_password(str(form.get("password", "")), _ip(request)):
         resp = RedirectResponse(nxt, status_code=303)
         _set_session(resp, await auth.new_session())
@@ -525,6 +535,16 @@ async def setup_signout_all(request: Request) -> Response:
     return resp
 
 
+@mcp.custom_route("/setup/clear-pause", methods=["POST"])
+async def setup_clear_pause(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
+    if not await _is_owner(request):
+        return _go()
+    await auth.clear_sign_in_pause()
+    return _go("pause_cleared")
+
+
 @mcp.custom_route("/setup/new-key", methods=["POST"])
 async def setup_new_key(request: Request) -> Response:
     if _cross_site(request):
@@ -593,7 +613,12 @@ async def connect(request: Request) -> Response:
         pending = await auth.pending_request(req_id)
         if not pending:
             return expired
-        return HTMLResponse(pages.connect_page(req_id, pending, locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()))
+        return HTMLResponse(
+            pages.connect_page(
+                req_id, pending, locked=await auth.locked_out(_ip(request)),
+                short_pw=not auth.password_ok_length(), owner=await _is_owner(request),
+            )
+        )
     if _cross_site(request):
         return _blocked()
     form = await request.form()
@@ -601,12 +626,19 @@ async def connect(request: Request) -> Response:
     pending = await auth.pending_request(req_id)
     if not pending:
         return expired
-    if not await auth.check_password(str(form.get("password", "")), _ip(request)):
-        _log_failed_sign_in(request, "/connect")
-        return HTMLResponse(
-            pages.connect_page(req_id, pending, error="Wrong password.", locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()),
-            status_code=401,
-        )
+    # Already signed in on this page (e.g. while sign-in is paused): no password needed.
+    if not await _is_owner(request):
+        if await auth.locked_out(_ip(request)):
+            return HTMLResponse(
+                pages.connect_page(req_id, pending, locked=True, short_pw=not auth.password_ok_length()),
+                status_code=429,
+            )
+        if not await auth.check_password(str(form.get("password", "")), _ip(request)):
+            _log_failed_sign_in(request, "/connect")
+            return HTMLResponse(
+                pages.connect_page(req_id, pending, error="Wrong password.", locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()),
+                status_code=401,
+            )
     try:
         return RedirectResponse(await auth.approve_request(req_id), status_code=303)
     except AuthorizeError:

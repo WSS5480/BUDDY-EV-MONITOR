@@ -206,12 +206,34 @@ check("disconnect Claude", r.status_code == 303 and "claude_disconnected" in r.h
 r = c.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 99, "method": "ping"})
 check("old Claude token stops working", r.status_code == 401, str(r.status_code))
 
-# 9. app-wide cap on wrong passwords (run last: it pauses sign-in for the hour)
+# 9. app-wide cap on wrong passwords, then the owner clears it
 x = httpx.Client(base_url=B, follow_redirects=False, timeout=30)
 for i in range(52):
     x.post("/login", data={"password": "wrong"}, headers={"CF-Connecting-IP": f"2001:db8:{i:x}::1"})
 r = x.post("/login", data={"password": PW}, headers={"CF-Connecting-IP": "203.0.113.9"})
 check("sign-in pauses after 50 wrong tries app-wide", "bem_session" not in r.headers.get("set-cookie", ""))
+check("paused sign-in says paused, not wrong password", "signin_paused" in r.headers.get("location", ""), r.headers.get("location"))
+r = c.get("/")
+check("owner session still works while paused", r.status_code == 200 and "Setup" in r.text)
+# Claude can still be (re)connected by the signed-in owner, with no password
+r = c.post("/register", json={"redirect_uris": [REDIRECT], "client_name": "Claude", "token_endpoint_auth_method": "none",
+                               "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
+cid3 = r.json()["client_id"]
+r = c.get("/authorize", params={"response_type": "code", "client_id": cid3, "redirect_uri": REDIRECT,
+                                "code_challenge": challenge, "code_challenge_method": "S256", "state": "p", "scope": "car"})
+req3 = parse_qs(urlparse(r.headers["location"]).query)["req"][0]
+r = c.get("/connect", params={"req": req3})
+check("signed-in owner sees connect page without password box", r.status_code == 200 and "Owner password" not in r.text)
+r = c.post("/connect", data={"req": req3})
+check("signed-in owner can reconnect Claude while paused", r.status_code == 303 and "code=" in r.headers.get("location", ""), str(r.status_code))
+r = x.post("/connect", data={"req": req3, "password": PW})
+check("stranger can't use connect while paused", r.status_code in (400, 429))
+r = x.post("/setup/clear-pause")
+check("clear pause needs owner session", r.status_code == 303 and "pause_cleared" not in r.headers.get("location", ""))
+r = c.post("/setup/clear-pause")
+check("owner clears the pause", r.status_code == 303 and "pause_cleared" in r.headers["location"])
+r = x.post("/login", data={"password": PW}, headers={"CF-Connecting-IP": "203.0.113.9"})
+check("sign-in works again after clearing", "bem_session" in r.headers.get("set-cookie", ""))
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails or "")
 sys.exit(1 if fails else 0)

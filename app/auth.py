@@ -117,6 +117,12 @@ async def locked_out(ip: str = "?") -> bool:
     return fails["until"] > time.time()
 
 
+async def clear_sign_in_pause() -> None:
+    """Owner (already signed in) lifts the app-wide pause and every per-address lockout."""
+    async with _fail_lock:
+        await store.delete_prefix("web:fails")  # covers K_FAILS* and K_FAILS_ALL
+
+
 async def new_session() -> str:
     token = secrets.token_urlsafe(32)
     await store.set(K_SESSION + _h(token), {"at": time.time()}, ttl=SESSION_TTL)

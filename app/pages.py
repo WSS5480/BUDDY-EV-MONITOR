@@ -42,7 +42,7 @@ def _msg(msg: str) -> str:
 
 
 def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_pw: bool = False) -> str:
-    note = "<p class=muted>Too many wrong tries. Sign-in is paused; try again later.</p>" if locked else ""
+    note = "<p class=muted>Too many wrong tries. Sign-in is paused for up to an hour.</p>" if locked else ""
     if short_pw:
         note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     return _page(
@@ -54,9 +54,11 @@ def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_p
     )
 
 
-def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = False, short_pw: bool = False) -> str:
+def connect_page(
+    req_id: str, pending: dict, error: str = "", locked: bool = False, short_pw: bool = False, owner: bool = False
+) -> str:
     err = f"<p style='color:var(--bad)'>{escape(error)}</p>" if error else ""
-    note = "<p class=muted>Too many wrong tries. Sign-in is paused; try again later.</p>" if locked else ""
+    note = "<p class=muted>Too many wrong tries. Sign-in is paused for up to an hour.</p>" if locked else ""
     if short_pw:
         note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     client_name = pending.get("client_name") or "An app"
@@ -68,9 +70,13 @@ def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = Fal
         "Unlocking, opening or starting the car will still need your approval on this site.</p>"
         f"<p class=muted>It will send you back to <b>{escape(host)}</b>. Only allow this if you just "
         "added the connector in Claude yourself.</p>"
-        f"{err}{note}<form method=post action=/connect><input type=hidden name=req value='{escape(req_id)}'>"
-        "<input type=password name=password placeholder='Owner password' autocomplete=current-password required autofocus>"
-        "<button>Allow</button></form></div>",
+        f"{err}{'' if owner else note}<form method=post action=/connect><input type=hidden name=req value='{escape(req_id)}'>"
+        + (
+            "<p class=muted>You're signed in on this site, so no password is needed.</p>"
+            if owner
+            else "<input type=password name=password placeholder='Owner password' autocomplete=current-password required autofocus>"
+        )
+        + "<button>Allow</button></form></div>",
     )
 
 
@@ -204,7 +210,8 @@ function back(){document.getElementById('detail').classList.add('hidden');docume
         "<div class=card><h2>Security</h2>"
         "<p class=muted>Cut off Claude (you can add the connector again later), or sign out of this page on every device.</p>"
         "<form method=post action=/setup/disconnect-claude style='display:inline'><button class='btn btn2'>Disconnect Claude</button></form> "
-        "<form method=post action=/setup/signout-all style='display:inline'><button class='btn btn2'>Sign out everywhere</button></form>"
+        "<form method=post action=/setup/signout-all style='display:inline'><button class='btn btn2'>Sign out everywhere</button></form> "
+        "<form method=post action=/setup/clear-pause style='display:inline'><button class='btn btn2'>Clear sign-in pause</button></form>"
         "<form method=post action=/setup/new-key style='margin-top:12px'>"
         "<p class=muted>Only if the car key can't be read (for example SECRET_KEY was lost): make a new one. "
         "You'll have to press Register and pair the car again.</p>"

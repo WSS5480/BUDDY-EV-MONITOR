@@ -47,6 +47,7 @@ Update this file **in the same commit as every change**: change log, decisions, 
   `/revoke`, `/.well-known/oauth-*` from the SDK. `/connect` owner password page during connect.
 - `/approve?id=` owner approves/denies an unlock-type action (needs owner sign-in).
 - `/setup/disconnect-claude`, `/setup/signout-all` (POST) owner kill switches.
+- `/setup/clear-pause` (POST) owner lifts the sign-in pause and per-address lockouts.
 - `/healthz` (`?db=1` also touches the database: used by the keep-alive).
 
 ### Tools
@@ -70,9 +71,9 @@ payment method and a billing limit above $0 (default $0 disables the app).
 ## Run / test / ship
 - Local: `pip install -r requirements.txt` then
   `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass-long-1 TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y SECRET_KEY=test TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
-  and `python tests/smoke_flow.py` (45 checks: connector OAuth, redirect allow-list, tools,
+  and `python tests/smoke_flow.py` (54 checks: connector OAuth, redirect allow-list, tools,
   approvals, owner pages, headers, cross-site POSTs, VIN check, host check, disconnect,
-  app-wide password cap; run it on a fresh DB, the last check pauses sign-in for an hour). Add `DATABASE_URL=postgresql://...`
+  app-wide password cap and the owner clearing it; run it on a fresh DB). Add `DATABASE_URL=postgresql://...`
   to test the Postgres path. `python tests/fake_tesla.py` checks the Tesla side against a fake
   Fleet API (token refresh, wake, refusals, signed switch, window location, encryption).
 - Ship: push `main`; Render auto-deploys. Service buddy-ev-monitor (srv-dbsvma7f3r2c73bh1q8g),
@@ -129,6 +130,18 @@ payment method and a billing limit above $0 (default $0 disables the app).
   IPv6 grouped by /64, failed sign-ins logged with which header gave the address, cross-site
   check trusts Sec-Fetch-Site and otherwise compares Origin with Host, register errors caught.
 
+- 2026-11-15 — Final review of the password cap: signed-in owner can reconnect Claude without a
+  password and has a "Clear sign-in pause" button (so a guesser can't keep him out), right
+  password during a pause says "paused" not "wrong", X-Forwarded-For uses the last entry (Render
+  appends the real address), IPv4-mapped IPv6 counts as the IPv4 address.
+- 2026-11-15 — Steve chose Supabase: free project buddy-ev-monitor (ref mpnvxhpcxzdpxvuhobuw,
+  us-east-2) created by the main chat. The app creates its own table `bem_kv` (with RLS and
+  revokes) on startup, so nothing has to be created in Supabase by hand.
+
+## Recovery
+- Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,
+  `DELETE FROM bem_kv WHERE k LIKE 'web:fails%';` then sign in.
+
 ## Open items
 - Confirm on Render which header carries the real client address: look for "Wrong owner
   password ... (via cf-connecting-ip)" in the logs after one wrong try.
@@ -137,7 +150,8 @@ payment method and a billing limit above $0 (default $0 disables the app).
   VIN would be faster; not done yet.
 - Two instances overlapping during a deploy each have their own refresh lock; Tesla's 24 h grace
   on the old refresh token covers the rare clash.
-- Steve: new Tesla developer credentials, then enter env vars; register; sign in with Tesla;
+- Render env names are set (SECRET_KEY random; the other four say ADD_YOURS until Steve fills
+  them; DATABASE_URL = Supabase Session pooler string). Steve: new Tesla developer credentials, then enter env vars; register; sign in with Tesla;
   add key to car; add connector in Claude.
 - Old Tesla public key in Karaoke history is unused now (the app makes a new key).
 - Untested against a real car until Steve signs in. First live check: vehicle_status, then lock.
