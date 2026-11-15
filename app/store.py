@@ -185,6 +185,18 @@ class Store:
             return None
         return json.loads(row[0])
 
+    async def expires_at(self, key: str) -> float | None:
+        if self.kind == "postgres":
+            assert self._pool is not None
+            async with await self._pg() as conn:
+                cur = await conn.execute("SELECT expires_at FROM bem_kv WHERE k = %s", (key,))
+                row = await cur.fetchone()
+            return row[0] if row else None
+        async with self._lock:
+            assert self._sqlite is not None
+            row = self._sqlite.execute("SELECT expires_at FROM bem_kv WHERE k = ?", (key,)).fetchone()
+        return row[0] if row else None
+
     async def delete(self, key: str) -> None:
         if self.kind == "postgres":
             assert self._pool is not None

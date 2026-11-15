@@ -38,6 +38,8 @@ K_ACCESS = "oauth:access:"
 K_REFRESH = "oauth:refresh:"
 K_SESSION = "web:session:"
 K_FAILS = "web:fails:"  # + client IP
+K_FAILS_ALL = "web:fails-all"  # app-wide wrong tries in the current hour
+MAX_FAILS_PER_HOUR = 50
 
 # Only Claude's own connector callbacks may receive codes (plus localhost when running locally),
 # so a phishing link registered by someone else can't collect a token.
@@ -73,7 +75,12 @@ async def check_password(password: str, ip: str = "?") -> bool:
     if not password_ok_length():
         return False  # a short OWNER_PASSWORD is refused outright (guessable online)
     key = K_FAILS + ip
-    async with _fail_lock:  # one Render instance, so an in-process lock makes the counter atomic
+    async with _fail_lock:  # one Render instance, so an in-process lock makes the counters atomic
+        # App-wide cap: after 50 wrong tries in an hour, new sign-ins pause until the hour ends.
+        # Existing owner sessions and Claude's connector keep working, so this only blocks guessing.
+        total = await store.get(K_FAILS_ALL) or {"n": 0}
+        if total["n"] >= MAX_FAILS_PER_HOUR:
+            return False
         fails = await store.get(key) or {"n": 0, "until": 0}
         if fails["until"] > time.time():
             return False
@@ -84,6 +91,11 @@ async def check_password(password: str, ip: str = "?") -> bool:
         n = fails["n"] + 1
         until = time.time() + 15 * 60 if n >= 5 else 0
         await store.set(key, {"n": 0 if until else n, "until": until}, ttl=60 * 60)
+        if total["n"] == 0:
+            await store.set(K_FAILS_ALL, {"n": 1}, ttl=60 * 60)  # window starts at the first miss
+        else:
+            ttl_left = await _ttl_left(K_FAILS_ALL)
+            await store.set(K_FAILS_ALL, {"n": total["n"] + 1}, ttl=max(ttl_left, 1))
     await asyncio.sleep(1)  # slow each wrong try, without making the owner wait behind others
     return False
 
@@ -92,7 +104,15 @@ def password_ok_length() -> bool:
     return len(config.OWNER_PASSWORD) >= config.MIN_PASSWORD_LEN
 
 
+async def _ttl_left(key: str) -> float:
+    exp = await store.expires_at(key)
+    return (exp - time.time()) if exp else 60 * 60
+
+
 async def locked_out(ip: str = "?") -> bool:
+    total = await store.get(K_FAILS_ALL) or {"n": 0}
+    if total["n"] >= MAX_FAILS_PER_HOUR:
+        return True
     fails = await store.get(K_FAILS + ip) or {"until": 0}
     return fails["until"] > time.time()
 

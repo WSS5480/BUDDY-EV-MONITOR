@@ -7,6 +7,7 @@ On Render:    uvicorn app.main:app --host 0.0.0.0 --port $PORT
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import logging
 import secrets
@@ -62,25 +63,53 @@ def _safe_next(value: str) -> str:
 
 def _ip(request: Request) -> str:
     """Best guess at the visitor's address for the per-address lockout. Render sits behind
-    Cloudflare, which sets CF-Connecting-IP; otherwise take the last X-Forwarded-For hop (added by
-    the proxy, not the visitor). Spoofing it only dodges the per-address count; the password
-    length rule and the per-try delay still apply."""
+    Cloudflare, which sets CF-Connecting-IP; otherwise the first X-Forwarded-For entry, otherwise
+    the socket. Only well-formed addresses count, and IPv6 is grouped by /64 (one home or server
+    gets a whole /64). Faking it only dodges the per-address count; the app-wide cap still holds."""
+    h = request.headers
+    candidates = [h.get("cf-connecting-ip", "")]
+    candidates.append(h.get("x-forwarded-for", "").split(",")[0])
+    candidates.append(request.client.host if request.client else "")
+    for raw in candidates:
+        raw = raw.strip()[:64]
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if ip.version == 6:
+            return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+        return str(ip)
+    return "?"
+
+
+def _ip_source(request: Request) -> str:
     h = request.headers
     if h.get("cf-connecting-ip"):
-        return h["cf-connecting-ip"].strip()
-    xff = [p.strip() for p in h.get("x-forwarded-for", "").split(",") if p.strip()]
-    if xff:
-        return xff[-1]
-    return request.client.host if request.client else "?"
+        return "cf-connecting-ip"
+    if h.get("x-forwarded-for"):
+        return "x-forwarded-for"
+    return "socket"
+
+
+def _log_failed_sign_in(request: Request, where: str) -> None:
+    # Address and which header it came from (never the password), to confirm Render's headers.
+    log.warning("Wrong owner password at %s from %s (via %s)", where, _ip(request), _ip_source(request))
 
 
 def _cross_site(request: Request) -> bool:
-    """True for a form POST that came from another site (extra guard beside SameSite cookies)."""
+    """True for a form POST that came from another site (extra guard beside SameSite=Lax cookies).
+    Modern browsers send Sec-Fetch-Site, which we trust alone. Older ones: compare Origin's host
+    with the request's own Host. Origin is often "null" here because of Referrer-Policy
+    no-referrer, so in those browsers the SameSite cookie is the real protection."""
     site = request.headers.get("sec-fetch-site")
-    if site and site not in ("same-origin", "none"):
-        return True
+    if site:
+        return site not in ("same-origin", "none")
     origin = request.headers.get("origin")
-    return bool(origin) and origin != "null" and origin.rstrip("/") != config.APP_URL
+    if not origin or origin == "null":
+        return False
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    return urlparse(origin).netloc.lower() != request.headers.get("host", "").lower()
 
 
 def _blocked() -> Response:
@@ -406,6 +435,7 @@ async def login(request: Request) -> Response:
         resp = RedirectResponse(nxt, status_code=303)
         _set_session(resp, await auth.new_session())
         return resp
+    _log_failed_sign_in(request, "/login")
     if nxt != "/":
         return RedirectResponse(f"{nxt}&m=wrong_password", status_code=303)
     return _go("wrong_password")
@@ -456,7 +486,7 @@ async def setup_register(request: Request) -> Response:
         return _go()
     try:
         await tesla.register_partner()
-    except tesla.CarError as e:
+    except Exception as e:
         log.warning("Partner registration failed: %s", e)
         return _go("register_failed")
     return _go("registered")
@@ -572,6 +602,7 @@ async def connect(request: Request) -> Response:
     if not pending:
         return expired
     if not await auth.check_password(str(form.get("password", "")), _ip(request)):
+        _log_failed_sign_in(request, "/connect")
         return HTMLResponse(
             pages.connect_page(req_id, pending, error="Wrong password.", locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()),
             status_code=401,

@@ -42,7 +42,7 @@ def _msg(msg: str) -> str:
 
 
 def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_pw: bool = False) -> str:
-    note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
+    note = "<p class=muted>Too many wrong tries. Sign-in is paused; try again later.</p>" if locked else ""
     if short_pw:
         note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     return _page(
@@ -56,7 +56,7 @@ def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_p
 
 def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = False, short_pw: bool = False) -> str:
     err = f"<p style='color:var(--bad)'>{escape(error)}</p>" if error else ""
-    note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
+    note = "<p class=muted>Too many wrong tries. Sign-in is paused; try again later.</p>" if locked else ""
     if short_pw:
         note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     client_name = pending.get("client_name") or "An app"

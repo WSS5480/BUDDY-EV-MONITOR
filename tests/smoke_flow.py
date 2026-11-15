@@ -194,6 +194,8 @@ out = call("unlock_doors", {"vin": "<b>Unlock all</b>"}, 12)
 check("junk VIN refused", "doesn't look like a VIN" in out, out)
 r = c.get("/")
 check("owner pages not cached", r.headers.get("cache-control") == "no-store")
+r = c.post("/setup/disconnect-claude", headers={"Sec-Fetch-Site": "same-site"})
+check("same-site (other subdomain) POST ignored", r.status_code == 403, str(r.status_code))
 
 r = httpx.post(f"{B}/mcp", headers={**H, "Host": "evil.example.com"}, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
 check("foreign Host header refused", r.status_code in (400, 421), str(r.status_code))
@@ -203,6 +205,13 @@ r = c.post("/setup/disconnect-claude")
 check("disconnect Claude", r.status_code == 303 and "claude_disconnected" in r.headers["location"])
 r = c.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 99, "method": "ping"})
 check("old Claude token stops working", r.status_code == 401, str(r.status_code))
+
+# 9. app-wide cap on wrong passwords (run last: it pauses sign-in for the hour)
+x = httpx.Client(base_url=B, follow_redirects=False, timeout=30)
+for i in range(52):
+    x.post("/login", data={"password": "wrong"}, headers={"CF-Connecting-IP": f"2001:db8:{i:x}::1"})
+r = x.post("/login", data={"password": PW}, headers={"CF-Connecting-IP": "203.0.113.9"})
+check("sign-in pauses after 50 wrong tries app-wide", "bem_session" not in r.headers.get("set-cookie", ""))
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails or "")
 sys.exit(1 if fails else 0)
