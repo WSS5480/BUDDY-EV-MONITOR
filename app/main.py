@@ -398,6 +398,9 @@ async def public_key(_request: Request) -> Response:
         pem = await tesla.public_key_pem()
     except tesla.CarError as e:
         return PlainTextResponse(str(e), status_code=503)
+    except Exception:
+        log.exception("Public key failed")
+        return PlainTextResponse("Can't read the car key right now.", status_code=503)
     return PlainTextResponse(pem, media_type="application/x-pem-file")
 
 
@@ -493,6 +496,9 @@ async def tesla_callback(request: Request) -> Response:
     except tesla.CarError as e:
         log.warning("Tesla code exchange failed: %s", e)
         return _go("tesla_failed")
+    except (Exception, tesla.TeslaFleetError):  # network or database trouble saving the sign-in
+        log.exception("Tesla code exchange failed")
+        return _go("tesla_failed")
     return _go("tesla_connected")
 
 
@@ -574,6 +580,11 @@ async def api_status(request: Request) -> Response:
         data: dict[str, Any] = await tesla.vehicle_data(None)
     except (tesla.NotConnected, tesla.CarError) as e:
         return JSONResponse({"error": str(e)})
+    except tesla.TeslaFleetError as e:  # BaseException subclass
+        return JSONResponse({"error": str(tesla._err(e))})
+    except Exception:
+        log.exception("Car status failed")
+        return JSONResponse({"error": "Couldn't reach Tesla just now. Try again in a minute."})
     return JSONResponse(data)
 
 

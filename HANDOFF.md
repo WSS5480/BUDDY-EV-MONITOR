@@ -149,6 +149,10 @@ payment method and a billing limit above $0 (default $0 disables the app).
   page shows a note instead of failing if the car check errors; approvals catch Tesla errors from
   the VIN lookup; new tests/test_library_api.py and fake-Tesla checks would have caught it
   (tests had always set TESLA_VIN, which skipped the car list).
+- 2026-11-15 — Review of that hotfix (no blockers): /api/status ("Check car") and the Tesla
+  sign-in callback now turn network/database errors into a message instead of a 500; the public
+  key route too; the home page's "Couldn't check the car" note now actually shows on unexpected
+  errors; fake-Tesla pairing check asserts True.
 
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,

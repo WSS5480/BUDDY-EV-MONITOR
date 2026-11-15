@@ -46,7 +46,7 @@ async def handler(req: web.Request) -> web.Response:
     if p == "/api/1/vehicles" or p.endswith("/vehicles/list"):
         return web.json_response({"error": "wrong endpoint"}, status=404)
     if p.endswith("fleet_status"):
-        return web.json_response({"response": {"key_paired_vins": ["VIN1"], "unpaired_vins": [],
+        return web.json_response({"response": {"key_paired_vins": ["VIN1", "5YJ3E1EA7KF000001"], "unpaired_vins": [],
                                                "vehicle_info": {"VIN1": {"vehicle_command_protocol_required": False}}}})
     if p.endswith("wake_up"):
         state["asleep"] = False
@@ -119,7 +119,7 @@ async def main():
     await store.delete(tesla.K_VIN)
     check("VIN found without TESLA_VIN", await tesla.resolve_vin(None) == "5YJ3E1EA7KF000001")
     paired = await tesla.key_paired()
-    check("key pairing check runs end to end (returns a value, no crash)", paired in (True, False, None), str(paired))
+    check("key pairing check runs end to end for the found car", paired is True, str(paired))
 
     await tesla.shutdown()
     await store.close()

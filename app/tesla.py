@@ -388,9 +388,6 @@ async def key_paired(vin: str | None = None) -> bool | None:
         resp = await _with_api(lambda api: api.vehicles.createFleet(vin).fleet_status([vin]))
     except (TeslaFleetError, CarError, NotConnected):
         return None
-    except Exception:  # never take the owner page down over a status check
-        log.exception("Key pairing check failed")
-        return None
     r = resp.get("response", {})
     if vin in (r.get("key_paired_vins") or []):
         return True
