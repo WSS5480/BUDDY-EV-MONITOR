@@ -89,6 +89,8 @@ payment method and a billing limit above $0 (default $0 disables the app).
 
 ## Free-plan limits
 - Sleeps after 15 min idle; first request takes about a minute (Claude may need a retry).
+  Claude's "Add custom connector" check fails if the service is asleep: open the app URL, wait
+  for it to load, then add the connector again.
 - No background jobs (no alerts). Supabase free pauses after ~7 days without use: restore it
   in Supabase; the owner page says "Can't reach the database" meanwhile. Paused past 90 days =
   data gone (sign in to Tesla and pair the car again). Tesla refresh tokens also lapse after
@@ -154,6 +156,10 @@ payment method and a billing limit above $0 (default $0 disables the app).
   key route too; the home page's "Couldn't check the car" note now actually shows on unexpected
   errors; fake-Tesla pairing check asserts True.
 
+- 2026-11-15 — Live: Steve registered, signed in with Tesla, paired the car and added the
+  connector in Claude (second try, after a cold start). vehicle_status from Claude returned real
+  data (online, 96%, locked). No commands tested on the car yet.
+
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,
   `DELETE FROM bem_kv WHERE k LIKE 'web:fails%';` then sign in.
@@ -166,8 +172,6 @@ payment method and a billing limit above $0 (default $0 disables the app).
   VIN would be faster; not done yet.
 - Two instances overlapping during a deploy each have their own refresh lock; Tesla's 24 h grace
   on the old refresh token covers the rare clash.
-- Render env names are set (SECRET_KEY random; the other four say ADD_YOURS until Steve fills
-  them; DATABASE_URL = Supabase Session pooler string). Steve: new Tesla developer credentials, then enter env vars; register; sign in with Tesla;
-  add key to car; add connector in Claude.
+- Render settings filled by Steve; DATABASE_URL = Supabase Session pooler string.
 - Old Tesla public key in Karaoke history is unused now (the app makes a new key).
-- Untested against a real car until Steve signs in. First live check: vehicle_status, then lock.
+- Read works on the real car. Next live check: lock_doors, then an approval-gated action.
