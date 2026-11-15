@@ -1,47 +1,22 @@
-# Tesla Monitor
+# Buddy EV Monitor
 
-A Tesla-app-style dashboard for monitoring your car, built for the Tesla Fleet API. Dark theme, live charge/climate/location cards, charge-session and driving charts. Runs on realistic demo data out of the box and switches to live data automatically once Fleet API credentials are configured on the server — the token never touches the browser.
+Lets Claude check and control your Tesla through Tesla's official Fleet API. It runs as a Claude
+custom connector (remote MCP server) on Render's free plan, with a free Supabase database to keep
+the Tesla sign-in and the car key.
 
-## Run locally
+Claude can read battery, range, charging, locks, climate and location, and can lock, set climate
+and temperature, start/stop charging, set the charge limit, honk and flash. Unlocking, opening the
+trunk or frunk, venting windows and remote start always need your yes first.
 
-```bash
-node server.js
-# open http://localhost:3000
-```
+## Setup
+1. Render → this service → Environment: add `TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`,
+   `OWNER_PASSWORD` (pick one) and `DATABASE_URL` (Supabase → Connect → Session pooler).
+2. Tesla developer app: allowed origin = the app URL, redirect URI = `<app URL>/auth/callback`,
+   turn on vehicle commands, charging commands and location; add a payment method and a billing
+   limit above $0.
+3. Open the app, sign in with the owner password, press **Register**, then **Sign in with Tesla**,
+   then **Add key to car** on your phone and approve it in the Tesla app.
+4. Claude → Settings → Connectors → Add custom connector → paste `<app URL>/mcp`, then enter the
+   owner password when asked.
 
-No dependencies. Node 18+.
-
-## Deploy on Render
-
-1. Push this repo to GitHub.
-2. In the [Render dashboard](https://dashboard.render.com), click **New → Blueprint**, pick this repo — `render.yaml` sets everything up (free plan).
-3. Deploy. The dashboard is live on your `onrender.com` URL, running demo data.
-
-Note: free Render services sleep after inactivity; the first visit after a while takes ~30s to wake.
-
-## Go live with your car
-
-The server has the whole flow built in. One-time setup:
-
-1. Create an app at [developer.tesla.com](https://developer.tesla.com) (origin `https://buddy-ev-monitor.onrender.com`, redirect `https://buddy-ev-monitor.onrender.com/auth/callback`).
-2. In Render -> buddy-ev-monitor -> **Environment**, set `TESLA_CLIENT_SECRET` (from your Tesla app's credentials). The Client ID is already in `server.js`.
-3. Visit `https://buddy-ev-monitor.onrender.com/setup/register` once - registers your domain with Tesla (the public key at `/.well-known/appspecific/com.tesla.3p.public-key.pem` is served automatically).
-4. Visit `https://buddy-ev-monitor.onrender.com/auth/login` and sign in with your Tesla account.
-5. The success page shows a **refresh token** - save it in Render as `TESLA_REFRESH_TOKEN` so the link survives restarts.
-
-The badge flips from **DEMO** to **LIVE**, and the dashboard swaps in Tesla's own render of *your* car - matching your paint color and wheels.
-
-Other env vars: `TESLA_VEHICLE_ID` (only if you own multiple Teslas), `TESLA_REGION_BASE` (non-US), `TESLA_TOKEN` (manual access token; legacy). Keep `tesla-private-key.pem` OUT of the repo - it's only needed later for vehicle commands.
-
-Add a payment method in the Tesla developer portal — billing is pay-per-use with a $10/month credit that comfortably covers a personal dashboard if you poll gently.
-
-## Roadmap
-
-- Token auto-refresh (refresh-token flow in `server.js`)
-- Fleet Telemetry ingestion for real charge-curve and driving history (much cheaper than polling)
-- Working commands (lock, climate, charge limit) via the vehicle-command proxy
-
-## Notes
-
-- `mapFleetToApp()` in `server.js` is the single place Fleet API data is shaped for the UI.
-- Charge-session and 7-day charts show demo data until telemetry storage exists; live snapshot fields (battery, range, climate, odometer, tires) are real once credentials are set.
+See HANDOFF.md for how it's built, decisions and open items.
