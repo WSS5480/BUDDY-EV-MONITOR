@@ -70,24 +70,26 @@ def _h(token: str) -> str:
 
 async def check_password(password: str, ip: str = "?") -> bool:
     """Constant-time check; 5 wrong tries from one address locks that address out for 15 minutes."""
+    if not password_ok_length():
+        return False  # a short OWNER_PASSWORD is refused outright (guessable online)
     key = K_FAILS + ip
     async with _fail_lock:  # one Render instance, so an in-process lock makes the counter atomic
         fails = await store.get(key) or {"n": 0, "until": 0}
         if fails["until"] > time.time():
             return False
-        ok = bool(config.OWNER_PASSWORD) and hmac.compare_digest(
-            password.encode(), config.OWNER_PASSWORD.encode()
-        )
+        ok = hmac.compare_digest(password.encode(), config.OWNER_PASSWORD.encode())
         if ok:
             await store.delete(key)
             return True
         n = fails["n"] + 1
         until = time.time() + 15 * 60 if n >= 5 else 0
         await store.set(key, {"n": 0 if until else n, "until": until}, ttl=60 * 60)
-        # Sleep while holding the lock: at most one wrong guess per second across all addresses,
-        # since the forwarded client address can be faked.
-        await asyncio.sleep(1)
+    await asyncio.sleep(1)  # slow each wrong try, without making the owner wait behind others
     return False
+
+
+def password_ok_length() -> bool:
+    return len(config.OWNER_PASSWORD) >= config.MIN_PASSWORD_LEN
 
 
 async def locked_out(ip: str = "?") -> bool:

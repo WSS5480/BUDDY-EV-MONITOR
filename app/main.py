@@ -44,6 +44,8 @@ MSGS = {
     "signed_out_all": "Signed out on every device.",
     "approved": "Approved. Tell Claude to go ahead.",
     "denied": "Denied. Nothing was done.",
+    "new_key": "Made a new car key. Press Register again, then Add key to car.",
+    "new_key_unconfirmed": "Tick the box first: a new key means pairing the car again.",
 }
 
 
@@ -59,7 +61,30 @@ def _safe_next(value: str) -> str:
 
 
 def _ip(request: Request) -> str:
+    """Best guess at the visitor's address for the per-address lockout. Render sits behind
+    Cloudflare, which sets CF-Connecting-IP; otherwise take the last X-Forwarded-For hop (added by
+    the proxy, not the visitor). Spoofing it only dodges the per-address count; the password
+    length rule and the per-try delay still apply."""
+    h = request.headers
+    if h.get("cf-connecting-ip"):
+        return h["cf-connecting-ip"].strip()
+    xff = [p.strip() for p in h.get("x-forwarded-for", "").split(",") if p.strip()]
+    if xff:
+        return xff[-1]
     return request.client.host if request.client else "?"
+
+
+def _cross_site(request: Request) -> bool:
+    """True for a form POST that came from another site (extra guard beside SameSite cookies)."""
+    site = request.headers.get("sec-fetch-site")
+    if site and site not in ("same-origin", "none"):
+        return True
+    origin = request.headers.get("origin")
+    return bool(origin) and origin != "null" and origin.rstrip("/") != config.APP_URL
+
+
+def _blocked() -> Response:
+    return HTMLResponse(pages.message_page("That request came from another site, so it was ignored."), status_code=403)
 
 
 @contextlib.asynccontextmanager
@@ -123,6 +148,8 @@ async def _run(coro) -> str:
         result = await coro
     except (tesla.NotConnected, tesla.CarError) as e:
         return str(e)
+    except tesla.TeslaFleetError as e:  # BaseException subclass: never let it escape
+        return str(tesla._err(e))
     except Exception as e:  # database or network trouble: say so instead of a bare error
         log.exception("Tool failed")
         return f"Something went wrong on the app's side ({e.__class__.__name__}). {store.error or ''}".strip()
@@ -150,7 +177,9 @@ async def _approval(action: str, vin: str | None, approval_id: str, what: str) -
                 f"{config.APP_URL}/approve?id={approval_id} and tap Approve, then call again."
             )
         rec = await store.take(K_APPROVAL + approval_id)  # single use
-        if rec and rec.get("status") == "approved":
+        if not rec:
+            return "That approval was already used. Nothing more was done."
+        if rec.get("status") == "approved":
             return None
         return "The owner denied this. Nothing was done."
     new_id = secrets.token_urlsafe(16)
@@ -350,14 +379,13 @@ async def home(request: Request) -> Response:
 async def _home(request: Request) -> Response:
     msg = MSGS.get(request.query_params.get("m", ""), "")
     if not await _is_owner(request):
-        return HTMLResponse(pages.login_page(locked=await auth.locked_out(_ip(request)), msg=msg))
+        return HTMLResponse(pages.login_page(locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length(), msg=msg))
     connected = await tesla.is_connected()
     paired = await tesla.key_paired() if connected else None
     return HTMLResponse(
         pages.dashboard(
             missing=config.missing_settings(),
             storage=store.kind,
-            weak_password=0 < len(config.OWNER_PASSWORD) < config.MIN_PASSWORD_LEN,
             connected=connected,
             registered=await tesla.partner_registered(),
             paired=paired,
@@ -370,6 +398,8 @@ async def _home(request: Request) -> Response:
 
 @mcp.custom_route("/login", methods=["POST"])
 async def login(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     form = await request.form()
     nxt = _safe_next(str(form.get("next", "")))
     if await auth.check_password(str(form.get("password", "")), _ip(request)):
@@ -383,6 +413,8 @@ async def login(request: Request) -> Response:
 
 @mcp.custom_route("/logout", methods=["POST"])
 async def logout(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     await auth.end_session(request.cookies.get(auth.SESSION_COOKIE))
     resp = RedirectResponse("/", status_code=303)
     resp.delete_cookie(auth.SESSION_COOKIE)
@@ -418,6 +450,8 @@ async def tesla_callback(request: Request) -> Response:
 
 @mcp.custom_route("/setup/register", methods=["POST"])
 async def setup_register(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     if not await _is_owner(request):
         return _go()
     try:
@@ -430,6 +464,8 @@ async def setup_register(request: Request) -> Response:
 
 @mcp.custom_route("/setup/disconnect", methods=["POST"])
 async def setup_disconnect(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     if not await _is_owner(request):
         return _go()
     await tesla.disconnect()
@@ -438,6 +474,8 @@ async def setup_disconnect(request: Request) -> Response:
 
 @mcp.custom_route("/setup/disconnect-claude", methods=["POST"])
 async def setup_disconnect_claude(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     if not await _is_owner(request):
         return _go()
     await auth.disconnect_all_connectors()
@@ -447,12 +485,27 @@ async def setup_disconnect_claude(request: Request) -> Response:
 
 @mcp.custom_route("/setup/signout-all", methods=["POST"])
 async def setup_signout_all(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
     if not await _is_owner(request):
         return _go()
     await auth.sign_out_everywhere()
     resp = _go("signed_out_all")
     resp.delete_cookie(auth.SESSION_COOKIE)
     return resp
+
+
+@mcp.custom_route("/setup/new-key", methods=["POST"])
+async def setup_new_key(request: Request) -> Response:
+    if _cross_site(request):
+        return _blocked()
+    if not await _is_owner(request):
+        return _go()
+    form = await request.form()
+    if form.get("confirm") != "yes":
+        return _go("new_key_unconfirmed")
+    await tesla.reset_key()
+    return _go("new_key")
 
 
 @mcp.custom_route("/api/status", methods=["GET"])
@@ -477,7 +530,7 @@ async def approve(request: Request) -> Response:
         if not await _is_owner(request):
             return HTMLResponse(
                 pages.login_page(
-                    locked=await auth.locked_out(_ip(request)),
+                    locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length(),
                     msg=MSGS.get(request.query_params.get("m", ""), "") or "Sign in to approve this.",
                     next_url=f"/approve?id={approval_id}",
                 )
@@ -485,6 +538,8 @@ async def approve(request: Request) -> Response:
         if rec.get("status") != "pending":
             return HTMLResponse(pages.message_page(f"Already {rec.get('status')}."))
         return HTMLResponse(pages.approve_page(approval_id, rec["what"], rec["vin"]))
+    if _cross_site(request):
+        return _blocked()
     if not await _is_owner(request):
         return _go()
     form = await request.form()
@@ -508,7 +563,9 @@ async def connect(request: Request) -> Response:
         pending = await auth.pending_request(req_id)
         if not pending:
             return expired
-        return HTMLResponse(pages.connect_page(req_id, pending, locked=await auth.locked_out(_ip(request))))
+        return HTMLResponse(pages.connect_page(req_id, pending, locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()))
+    if _cross_site(request):
+        return _blocked()
     form = await request.form()
     req_id = str(form.get("req", ""))
     pending = await auth.pending_request(req_id)
@@ -516,7 +573,7 @@ async def connect(request: Request) -> Response:
         return expired
     if not await auth.check_password(str(form.get("password", "")), _ip(request)):
         return HTMLResponse(
-            pages.connect_page(req_id, pending, error="Wrong password.", locked=await auth.locked_out(_ip(request))),
+            pages.connect_page(req_id, pending, error="Wrong password.", locked=await auth.locked_out(_ip(request)), short_pw=not auth.password_ok_length()),
             status_code=401,
         )
     try:
@@ -533,6 +590,11 @@ SECURITY_HEADERS = [
 ]
 
 
+if config.APP_URL.startswith("https://"):
+    SECURITY_HEADERS.append((b"strict-transport-security", b"max-age=31536000"))
+NO_STORE_PREFIXES = ("/approve", "/connect", "/api/status")
+
+
 class SecurityHeaders:
     """Plain ASGI wrapper (not BaseHTTPMiddleware, which would break streaming responses)."""
 
@@ -543,11 +605,16 @@ class SecurityHeaders:
         if scope["type"] != "http":
             return await self.inner(scope, receive, send)
 
+        extra = list(SECURITY_HEADERS)
+        path = scope.get("path", "")
+        if path == "/" or path.startswith(NO_STORE_PREFIXES):
+            extra.append((b"cache-control", b"no-store"))
+
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 names = {k.lower() for k, _ in message.get("headers", [])}
                 message["headers"] = list(message.get("headers", [])) + [
-                    (k, v) for k, v in SECURITY_HEADERS if k not in names
+                    (k, v) for k, v in extra if k not in names
                 ]
             await send(message)
 

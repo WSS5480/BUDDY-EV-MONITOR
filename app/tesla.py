@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
@@ -43,6 +44,10 @@ class NotConnected(Exception):
 class CarError(Exception):
     """A readable failure to show Claude / the owner."""
 
+    def __init__(self, message: str, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 _refresh_lock = asyncio.Lock()
 _key_lock = asyncio.Lock()
@@ -80,12 +85,26 @@ async def load_or_create_key() -> ec.EllipticCurvePrivateKey:
         try:
             pem = unseal(stored)
         except CannotDecrypt as e:
-            # Never make a new key here: the car is paired with the old one.
-            raise CarError(f"{e} Put the old SECRET_KEY back in Render.") from None
+            # Never make a new key silently: the car is paired with the old one.
+            raise CarError(
+                f"{e} Put the old SECRET_KEY back in Render, or use Make a new car key on the app page "
+                "(then pair the car again)."
+            ) from None
+        if config.SECRET_KEY and stored == pem:  # saved before SECRET_KEY was set: encrypt it now
+            await store.set(K_KEY, seal(pem))
         key = serialization.load_pem_private_key(pem.encode(), password=None)
         assert isinstance(key, ec.EllipticCurvePrivateKey)
         _private_key = key
         return key
+
+
+async def reset_key() -> None:
+    """Owner asked for a new car key (old one unusable). The car must be paired again."""
+    global _private_key
+    async with _key_lock:
+        await store.delete(K_KEY)
+        await store.delete(K_PARTNER)  # Tesla must re-read the new public key
+        _private_key = None
 
 
 async def public_key_pem() -> str:
@@ -125,7 +144,7 @@ async def _token_post(data: dict[str, str]) -> dict[str, Any]:
         body = {"error": r.text[:200]}
     if r.status_code >= 400 or "access_token" not in body:
         err = body.get("error_description") or body.get("error") or f"HTTP {r.status_code}"
-        raise CarError(f"Tesla sign-in failed: {err}")
+        raise CarError(f"Tesla sign-in failed: {err}", code=str(body.get("error") or r.status_code))
     return body
 
 
@@ -200,7 +219,9 @@ async def access_token(force_refresh: bool = False, rejected: str | None = None)
                 }
             )
         except CarError as e:
-            raise NotConnected(f"Tesla sign-in expired, sign in with Tesla again on the app's home page. ({e})")
+            if e.code in ("invalid_grant", "login_required", "invalid_client", "unauthorized_client"):
+                raise NotConnected(f"Tesla sign-in expired, sign in with Tesla again on the app's home page. ({e})") from None
+            raise CarError(f"Tesla's sign-in service had a problem; try again in a minute. ({e})") from None
         tokens = await _save_tokens(body, tokens["refresh_token"])
         return tokens["access_token"]
 
@@ -319,7 +340,10 @@ async def list_vehicles() -> list[dict[str, Any]]:
 
 async def resolve_vin(vin: str | None) -> str:
     if vin:
-        return vin.strip().upper()
+        vin = vin.strip().upper()
+        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin):
+            raise CarError("That doesn't look like a VIN (17 letters and numbers). Leave vin empty for your car.")
+        return vin
     if config.TESLA_VIN:
         return config.TESLA_VIN
     saved = await store.get(K_VIN)
@@ -467,6 +491,10 @@ async def _command(api: TeslaFleetApi, vin: str, name: str, args: tuple, kwargs:
                 await api.vehicles.createFleet(vin).wake_up(wait=True, timeout=WAKE_SECONDS)
             except VehicleOffline:
                 raise CarError(ASLEEP) from None
+            except TOKEN_ERRORS:
+                raise
+            except TeslaFleetError as e2:
+                raise _err(e2) from None
         except TeslaFleetError as e:
             needs_key = isinstance(e, SignedCommandRequired) or _protocol_required(e)
             if not needs_key:

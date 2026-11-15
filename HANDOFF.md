@@ -57,9 +57,10 @@ the site, second call passes approval_id): unlock_doors, open_trunk, open_frunk,
 remote_start.
 
 ## Settings (Render → Environment)
-`TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD` (12+ chars), `DATABASE_URL`
-(Supabase session pooler string), `SECRET_KEY` (Render Generate; changing it loses the Tesla
-sign-in and the car key, so the car must be paired again). Optional: `TESLA_VIN` (pick a car), `TESLA_REGION` (na default), `APP_URL`
+`TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD` (12+ chars; shorter = sign-in
+refused), `DATABASE_URL` (Supabase session pooler string), `SECRET_KEY` (Render Generate). If
+SECRET_KEY changes, saved data can't be read: put the old one back, or use "Make a new car key"
+on the owner page and then Register, sign in with Tesla and pair the car again. Optional: `TESLA_VIN` (pick a car), `TESLA_REGION` (na default), `APP_URL`
 (defaults to Render's RENDER_EXTERNAL_URL).
 
 Tesla developer app (developer.tesla.com) must have: allowed origin = app URL, redirect URI =
@@ -68,12 +69,15 @@ payment method and a billing limit above $0 (default $0 disables the app).
 
 ## Run / test / ship
 - Local: `pip install -r requirements.txt` then
-  `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y SECRET_KEY=test TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
-  and `python tests/smoke_flow.py` (41 checks: connector OAuth, redirect allow-list, tools,
-  approvals, owner pages, headers, host check, disconnect). Add `DATABASE_URL=postgresql://...`
+  `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass-long-1 TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y SECRET_KEY=test TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
+  and `python tests/smoke_flow.py` (43 checks: connector OAuth, redirect allow-list, tools,
+  approvals, owner pages, headers, cross-site POSTs, VIN check, host check, disconnect). Add `DATABASE_URL=postgresql://...`
   to test the Postgres path. `python tests/fake_tesla.py` checks the Tesla side against a fake
   Fleet API (token refresh, wake, refusals, signed switch, window location, encryption).
-- Ship: push `main`; Render auto-deploys (service buddy-ev-monitor, MY APPS workspace, free).
+- Ship: push `main`; Render auto-deploys. Service buddy-ev-monitor (srv-dbsvma7f3r2c73bh1q8g),
+  MY APPS workspace, free plan, https://buddy-ev-monitor-gk37.onrender.com (created 2026-11-15
+  via the Render API, so render.yaml isn't applied: health check path and SECRET_KEY generate
+  are set by hand in the dashboard if wanted). MY APPS is at the hobby 25-service limit.
 
 ## Free-plan limits
 - Sleeps after 15 min idle; first request takes about a minute (Claude may need a retry).
@@ -112,7 +116,15 @@ payment method and a billing limit above $0 (default $0 disables the app).
   RLS + encryption, redirect allow-list, lockout, headers, kill switches, token-rejected refresh,
   25 s wake, REST-refused switch to signed, window commands send location, key race fix.
 
+- 2026-11-15 — Third review (of the security pass): fixed owner lock-out by slow parallel
+  guesses (delay now per request, not global), short passwords refused, client address from
+  CF-Connecting-IP / last X-Forwarded-For, cross-site POST guard on every owner form, Tesla
+  errors from the wake step no longer escape, "Make a new car key" recovery, VIN format check,
+  "already used" message, Tesla outage vs expired sign-in, HSTS + no-store, plaintext key
+  re-encrypted once SECRET_KEY is set. Live on Render at buddy-ev-monitor-gk37.
+
 ## Open items
+- Confirm on Render which header carries the real client address (CF-Connecting-IP expected).
 - Signed vehicle sessions are made per command (an extra handshake each time). Caching one per
   VIN would be faster; not done yet.
 - Two instances overlapping during a deploy each have their own refresh lock; Tesla's 24 h grace

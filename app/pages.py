@@ -41,8 +41,10 @@ def _msg(msg: str) -> str:
     return f"<div class=msg>{escape(msg)}</div>" if msg else ""
 
 
-def login_page(locked: bool = False, msg: str = "", next_url: str = "/") -> str:
+def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_pw: bool = False) -> str:
     note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
+    if short_pw:
+        note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     return _page(
         "Buddy EV Monitor",
         f"<h1>Buddy EV Monitor</h1>{_msg(msg)}<div class=card><h2>Owner sign-in</h2>{note}"
@@ -52,9 +54,11 @@ def login_page(locked: bool = False, msg: str = "", next_url: str = "/") -> str:
     )
 
 
-def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = False) -> str:
+def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = False, short_pw: bool = False) -> str:
     err = f"<p style='color:var(--bad)'>{escape(error)}</p>" if error else ""
     note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
+    if short_pw:
+        note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     client_name = pending.get("client_name") or "An app"
     host = pending.get("redirect_host") or "?"
     return _page(
@@ -96,7 +100,6 @@ def dashboard(
     *,
     missing: list[str],
     storage: str,
-    weak_password: bool = False,
     connected: bool,
     registered: bool,
     paired: bool | None,
@@ -110,10 +113,6 @@ def dashboard(
         steps.append(_step("bad", "Add settings in Render → Environment", f"<div class=muted>Still missing:</div>{names}"))
     else:
         steps.append(_step("ok", "Settings are in place"))
-    if weak_password:
-        steps.append(
-            _step("warn", "Use a longer owner password", "<div class=muted>This password guards your car. Make OWNER_PASSWORD at least 12 characters.</div>")
-        )
     if storage != "postgres":
         steps.append(
             _step("warn", "No database yet", "<div class=muted>Add DATABASE_URL first. Without it the Tesla sign-in and car key are lost on every restart, so the next steps are hidden.</div>")
@@ -205,6 +204,11 @@ function back(){document.getElementById('detail').classList.add('hidden');docume
         "<div class=card><h2>Security</h2>"
         "<p class=muted>Cut off Claude (you can add the connector again later), or sign out of this page on every device.</p>"
         "<form method=post action=/setup/disconnect-claude style='display:inline'><button class='btn btn2'>Disconnect Claude</button></form> "
-        "<form method=post action=/setup/signout-all style='display:inline'><button class='btn btn2'>Sign out everywhere</button></form></div>"
+        "<form method=post action=/setup/signout-all style='display:inline'><button class='btn btn2'>Sign out everywhere</button></form>"
+        "<form method=post action=/setup/new-key style='margin-top:12px'>"
+        "<p class=muted>Only if the car key can't be read (for example SECRET_KEY was lost): make a new one. "
+        "You'll have to press Register and pair the car again.</p>"
+        "<label class=muted><input type=checkbox name=confirm value=yes> I understand</label> "
+        "<button class='btn btn2'>Make a new car key</button></form></div>"
         "<form method=post action=/logout><button class='btn btn2'>Sign out</button></form>",
     )

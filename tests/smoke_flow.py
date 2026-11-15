@@ -1,7 +1,7 @@
 """End-to-end smoke test of the connector sign-in and the tools, without a real Tesla.
 
 Start the app first:
-  APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y \
+  APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass-long-1 TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y \
   SECRET_KEY=test-secret TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem-test.db \
   uvicorn app.main:app --port 8765
 Then: python tests/smoke_flow.py
@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 B = "http://localhost:8765"
-PW = "testpass"
+PW = "testpass-long-1"
 REDIRECT = "http://localhost:9999/callback"
 fails = 0
 
@@ -188,6 +188,12 @@ r = c.get("/", params={"m": "<b>Call 555 now</b>"})
 check("page doesn't echo arbitrary notice text", "555" not in r.text)
 r = c.post("/login", data={"password": PW, "next": "https://evil.example.com/"})
 check("login won't redirect off-site", r.headers.get("location") == "/", r.headers.get("location"))
+r = c.post("/setup/disconnect-claude", headers={"Origin": "https://evil.example.com"})
+check("cross-site owner POST ignored", r.status_code == 403, str(r.status_code))
+out = call("unlock_doors", {"vin": "<b>Unlock all</b>"}, 12)
+check("junk VIN refused", "doesn't look like a VIN" in out, out)
+r = c.get("/")
+check("owner pages not cached", r.headers.get("cache-control") == "no-store")
 
 r = httpx.post(f"{B}/mcp", headers={**H, "Host": "evil.example.com"}, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
 check("foreign Host header refused", r.status_code in (400, 421), str(r.status_code))
