@@ -41,27 +41,45 @@ def _msg(msg: str) -> str:
     return f"<div class=msg>{escape(msg)}</div>" if msg else ""
 
 
-def login_page(locked: bool = False, msg: str = "") -> str:
+def login_page(locked: bool = False, msg: str = "", next_url: str = "/") -> str:
     note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
     return _page(
         "Buddy EV Monitor",
         f"<h1>Buddy EV Monitor</h1>{_msg(msg)}<div class=card><h2>Owner sign-in</h2>{note}"
-        "<form method=post action=/login><input type=password name=password placeholder='Owner password' "
+        f"<form method=post action=/login><input type=hidden name=next value='{escape(next_url)}'>"
+        "<input type=password name=password placeholder='Owner password' "
         "autocomplete=current-password required autofocus><button>Sign in</button></form></div>",
     )
 
 
-def connect_page(req_id: str, client_name: str, error: str = "", locked: bool = False) -> str:
+def connect_page(req_id: str, pending: dict, error: str = "", locked: bool = False) -> str:
     err = f"<p style='color:var(--bad)'>{escape(error)}</p>" if error else ""
     note = "<p class=muted>Too many wrong tries. Wait 15 minutes.</p>" if locked else ""
+    client_name = pending.get("client_name") or "An app"
+    host = pending.get("redirect_host") or "?"
     return _page(
         "Connect Claude to your Tesla",
         "<h1>Connect Claude to your Tesla</h1><div class=card>"
         f"<p><b>{escape(client_name)}</b> is asking to check and control your car through Buddy EV Monitor. "
-        "Unlocking, opening or starting the car will still ask you first.</p>"
+        "Unlocking, opening or starting the car will still need your approval on this site.</p>"
+        f"<p class=muted>It will send you back to <b>{escape(host)}</b>. Only allow this if you just "
+        "added the connector in Claude yourself.</p>"
         f"{err}{note}<form method=post action=/connect><input type=hidden name=req value='{escape(req_id)}'>"
         "<input type=password name=password placeholder='Owner password' autocomplete=current-password required autofocus>"
         "<button>Allow</button></form></div>",
+    )
+
+
+def approve_page(approval_id: str, what: str, vin: str) -> str:
+    return _page(
+        "Approve car action",
+        "<h1>Approve car action</h1><div class=card>"
+        f"<p>Claude asked to: <b>{escape(what)}</b></p><p class=muted>Car {escape(vin)}. "
+        "Only approve if you asked Claude for this just now.</p>"
+        f"<form method=post action=/approve style='display:inline'><input type=hidden name=id value='{escape(approval_id)}'>"
+        "<input type=hidden name=decision value=approve><button>Approve</button></form> "
+        f"<form method=post action=/approve style='display:inline'><input type=hidden name=id value='{escape(approval_id)}'>"
+        "<input type=hidden name=decision value=deny><button class='btn btn2'>Deny</button></form></div>",
     )
 
 
@@ -78,6 +96,7 @@ def dashboard(
     *,
     missing: list[str],
     storage: str,
+    weak_password: bool = False,
     connected: bool,
     registered: bool,
     paired: bool | None,
@@ -91,30 +110,38 @@ def dashboard(
         steps.append(_step("bad", "Add settings in Render → Environment", f"<div class=muted>Still missing:</div>{names}"))
     else:
         steps.append(_step("ok", "Settings are in place"))
+    if weak_password:
+        steps.append(
+            _step("warn", "Use a longer owner password", "<div class=muted>This password guards your car. Make OWNER_PASSWORD at least 12 characters.</div>")
+        )
     if storage != "postgres":
         steps.append(
-            _step("warn", "No database yet", "<div class=muted>Add DATABASE_URL, or the Tesla sign-in and key are lost on every restart.</div>")
+            _step("warn", "No database yet", "<div class=muted>Add DATABASE_URL first. Without it the Tesla sign-in and car key are lost on every restart, so the next steps are hidden.</div>")
         )
-    steps.append(
-        _step("ok", "Registered with Tesla")
-        if registered
-        else _step(
-            "bad",
-            "Register this site with Tesla",
-            "<div class=muted>One time, after the Tesla settings are in.</div>"
-            "<form method=post action=/setup/register style='margin-top:8px'><button>Register</button></form>",
+    has_db = storage == "postgres"
+    if has_db:
+        steps.append(
+            _step("ok", "Registered with Tesla")
+            if registered
+            else _step(
+                "bad",
+                "Register this site with Tesla",
+                "<div class=muted>One time, after the Tesla settings are in.</div>"
+                "<form method=post action=/setup/register style='margin-top:8px'><button>Register</button></form>",
+            )
         )
-    )
-    steps.append(
-        _step(
-            "ok",
-            "Tesla account connected",
-            "<form method=post action=/setup/disconnect style='margin-top:8px'><button class='btn btn2'>Disconnect</button></form>",
+        steps.append(
+            _step(
+                "ok",
+                "Tesla account connected",
+                "<form method=post action=/setup/disconnect style='margin-top:8px'><button class='btn btn2'>Disconnect</button></form>",
+            )
+            if connected
+            else _step("bad", "Sign in with Tesla", "<div style='margin-top:8px'><a class=btn href=/auth/login>Sign in with Tesla</a></div>")
         )
-        if connected
-        else _step("bad", "Sign in with Tesla", "<div style='margin-top:8px'><a class=btn href=/auth/login>Sign in with Tesla</a></div>")
-    )
-    if paired is True:
+    if not has_db:
+        pass
+    elif paired is True:
         steps.append(_step("ok", "Key is on the car"))
     else:
         detail = (
@@ -175,5 +202,9 @@ function back(){document.getElementById('detail').classList.add('hidden');docume
         "Buddy EV Monitor",
         f"<h1>Buddy EV Monitor</h1>{_msg(msg)}"
         f"<div class=card><h2>Setup</h2>{''.join(steps)}</div>{car}"
+        "<div class=card><h2>Security</h2>"
+        "<p class=muted>Cut off Claude (you can add the connector again later), or sign out of this page on every device.</p>"
+        "<form method=post action=/setup/disconnect-claude style='display:inline'><button class='btn btn2'>Disconnect Claude</button></form> "
+        "<form method=post action=/setup/signout-all style='display:inline'><button class='btn btn2'>Sign out everywhere</button></form></div>"
         "<form method=post action=/logout><button class='btn btn2'>Sign out</button></form>",
     )

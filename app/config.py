@@ -13,6 +13,9 @@ def _env(name: str, default: str = "") -> str:
 TESLA_CLIENT_ID = _env("TESLA_CLIENT_ID")
 TESLA_CLIENT_SECRET = _env("TESLA_CLIENT_SECRET")
 OWNER_PASSWORD = _env("OWNER_PASSWORD")
+# Encrypts the Tesla tokens and the car key in the database. Any long random string
+# (Render's "Generate" button makes one). Changing it means signing in with Tesla again.
+SECRET_KEY = _env("SECRET_KEY")
 TESLA_REGION = _env("TESLA_REGION", "na") or "na"
 TESLA_VIN = _env("TESLA_VIN").upper()
 
@@ -34,7 +37,8 @@ TESLA_SCOPES = "openid offline_access user_data vehicle_device_data vehicle_loca
 CONNECTOR_SCOPE = "car"
 CONNECTOR_ACCESS_TTL = 60 * 60  # 1 hour
 CONNECTOR_REFRESH_TTL = 60 * 60 * 24 * 90  # 90 days
-CONFIRM_TTL = 5 * 60  # confirmation codes for unlock-type actions
+APPROVAL_TTL = 10 * 60  # owner approvals for unlock-type actions
+MIN_PASSWORD_LEN = 12
 
 
 def missing_settings() -> list[str]:
@@ -43,6 +47,7 @@ def missing_settings() -> list[str]:
         ("TESLA_CLIENT_ID", TESLA_CLIENT_ID),
         ("TESLA_CLIENT_SECRET", TESLA_CLIENT_SECRET),
         ("OWNER_PASSWORD", OWNER_PASSWORD),
+        ("SECRET_KEY", SECRET_KEY),
         ("DATABASE_URL", os.environ.get("DATABASE_URL", "").strip()),
     ):
         if not value:

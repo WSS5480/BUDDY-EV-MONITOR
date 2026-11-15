@@ -8,11 +8,13 @@ hashed, so a database leak doesn't hand out working tokens.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp.server.auth.provider import (
     AccessToken,
@@ -20,6 +22,7 @@ from mcp.server.auth.provider import (
     AuthorizationParams,
     AuthorizeError,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -34,7 +37,25 @@ K_CODE = "oauth:code:"
 K_ACCESS = "oauth:access:"
 K_REFRESH = "oauth:refresh:"
 K_SESSION = "web:session:"
-K_FAILS = "web:fails"
+K_FAILS = "web:fails:"  # + client IP
+
+# Only Claude's own connector callbacks may receive codes (plus localhost when running locally),
+# so a phishing link registered by someone else can't collect a token.
+ALLOWED_REDIRECTS = {
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+}
+MAX_CLIENTS = 25
+CLIENT_TTL = 60 * 60 * 24 * 180
+_fail_lock = asyncio.Lock()
+
+
+def redirect_allowed(uri: str) -> bool:
+    if uri in ALLOWED_REDIRECTS:
+        return True
+    if config.APP_URL.startswith(("http://localhost", "http://127.0.0.1")):
+        return urlparse(uri).hostname in ("localhost", "127.0.0.1")
+    return False
 
 SESSION_COOKIE = "bem_session"
 SESSION_TTL = 60 * 60 * 24 * 30
@@ -47,25 +68,30 @@ def _h(token: str) -> str:
 # ---------- owner password + web sessions ----------
 
 
-async def check_password(password: str) -> bool:
-    """Constant-time check with a simple lockout after repeated failures."""
-    fails = await store.get(K_FAILS) or {"n": 0, "until": 0}
-    if fails["until"] > time.time():
-        return False
-    ok = bool(config.OWNER_PASSWORD) and hmac.compare_digest(
-        password.encode(), config.OWNER_PASSWORD.encode()
-    )
-    if ok:
-        await store.delete(K_FAILS)
-        return True
-    n = fails["n"] + 1
-    until = time.time() + 15 * 60 if n >= 5 else 0
-    await store.set(K_FAILS, {"n": 0 if until else n, "until": until}, ttl=60 * 60)
+async def check_password(password: str, ip: str = "?") -> bool:
+    """Constant-time check; 5 wrong tries from one address locks that address out for 15 minutes."""
+    key = K_FAILS + ip
+    async with _fail_lock:  # one Render instance, so an in-process lock makes the counter atomic
+        fails = await store.get(key) or {"n": 0, "until": 0}
+        if fails["until"] > time.time():
+            return False
+        ok = bool(config.OWNER_PASSWORD) and hmac.compare_digest(
+            password.encode(), config.OWNER_PASSWORD.encode()
+        )
+        if ok:
+            await store.delete(key)
+            return True
+        n = fails["n"] + 1
+        until = time.time() + 15 * 60 if n >= 5 else 0
+        await store.set(key, {"n": 0 if until else n, "until": until}, ttl=60 * 60)
+        # Sleep while holding the lock: at most one wrong guess per second across all addresses,
+        # since the forwarded client address can be faked.
+        await asyncio.sleep(1)
     return False
 
 
-async def locked_out() -> bool:
-    fails = await store.get(K_FAILS) or {"until": 0}
+async def locked_out(ip: str = "?") -> bool:
+    fails = await store.get(K_FAILS + ip) or {"until": 0}
     return fails["until"] > time.time()
 
 
@@ -95,7 +121,14 @@ class OwnerOAuthProvider:
         return OAuthClientInformationFull.model_validate(data) if data else None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        await store.set(K_CLIENT + client_info.client_id, client_info.model_dump(mode="json"))
+        uris = [str(u) for u in (client_info.redirect_uris or [])]
+        if not uris or not all(redirect_allowed(u) for u in uris):
+            raise RegistrationError("invalid_redirect_uri", "Only Claude's connector callback is allowed.")
+        if await store.count_prefix(K_CLIENT) >= MAX_CLIENTS:
+            raise RegistrationError(
+                "invalid_client_metadata", "Too many connections; disconnect Claude on the app page first."
+            )
+        await store.set(K_CLIENT + client_info.client_id, client_info.model_dump(mode="json"), ttl=CLIENT_TTL)
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         req_id = secrets.token_urlsafe(24)
@@ -110,6 +143,7 @@ class OwnerOAuthProvider:
                 "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
                 "resource": params.resource,
                 "client_name": client.client_name,
+                "redirect_host": urlparse(str(params.redirect_uri)).hostname,
             },
             ttl=10 * 60,
         )
@@ -213,3 +247,13 @@ async def approve_request(req_id: str) -> str:
         ttl=5 * 60,
     )
     return construct_redirect_uri(data["redirect_uri"], code=code, state=data.get("state"))
+
+
+async def disconnect_all_connectors() -> None:
+    """Cut off every Claude connection (clients, tokens, pending sign-ins)."""
+    for prefix in (K_CLIENT, K_PENDING, K_CODE, K_ACCESS, K_REFRESH):
+        await store.delete_prefix(prefix)
+
+
+async def sign_out_everywhere() -> None:
+    await store.delete_prefix(K_SESSION)

@@ -17,7 +17,8 @@ Update this file **in the same commit as every change**: change log, decisions, 
   reviewers don't push code themselves (they report, the coder verifies and pushes).
 - UI: wrap info (cards, no sideways tables), headers over their data, summary tiles drill down
   with a back button, phone first.
-- Anything that unlocks, opens or starts the car needs an explicit confirmation step.
+- Anything that unlocks, opens or starts the car needs an explicit confirmation step (done as an
+  owner approval link, see Decisions).
 - Keep the Karaoke repo (WSS5480/Karaoke) and its Render service untouched. This app's code
   started there in Aug 2026 and was moved out with its history on Nov 15 2026.
 
@@ -33,7 +34,9 @@ Update this file **in the same commit as every change**: change log, decisions, 
     Vehicle Command protocol, else plain REST; checked with fleet_status, cached a week).
   - `app/store.py` — key-value table `bem_kv` in Postgres (DATABASE_URL) or a SQLite file when no
     DATABASE_URL (local only; on Render free that's wiped on restart).
-  - `app/pages.py` — owner pages (sign-in, setup checklist, car tiles that drill down).
+  - `app/pages.py` — owner pages (sign-in, setup checklist, car tiles that drill down, approval
+    page, security buttons).
+  - `app/crypt.py` — Fernet encryption (key from SECRET_KEY) for the Tesla tokens and car key.
 - Tesla's library errors subclass **BaseException**, not Exception: catch `TeslaFleetError`.
 
 ### Endpoints
@@ -42,17 +45,21 @@ Update this file **in the same commit as every change**: change log, decisions, 
 - `/.well-known/appspecific/com.tesla.3p.public-key.pem` public virtual key.
 - `/mcp` the connector (Bearer token from our OAuth). `/authorize`, `/token`, `/register`,
   `/revoke`, `/.well-known/oauth-*` from the SDK. `/connect` owner password page during connect.
-- `/healthz`.
+- `/approve?id=` owner approves/denies an unlock-type action (needs owner sign-in).
+- `/setup/disconnect-claude`, `/setup/signout-all` (POST) owner kill switches.
+- `/healthz` (`?db=1` also touches the database: used by the keep-alive).
 
 ### Tools
 Read: list_vehicles, vehicle_status. Actions: wake_vehicle, lock_doors, climate_on/off,
 set_temperature (F), start/stop_charging, set_charge_limit, honk_horn, flash_lights,
-close_windows. Need a confirmation code (two calls, owner's yes in between): unlock_doors,
-open_trunk, open_frunk, vent_windows, remote_start.
+close_windows. Need owner approval (first call returns an /approve link, owner taps Approve on
+the site, second call passes approval_id): unlock_doors, open_trunk, open_frunk, vent_windows,
+remote_start.
 
 ## Settings (Render → Environment)
-`TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD`, `DATABASE_URL` (Supabase session
-pooler string). Optional: `TESLA_VIN` (pick a car), `TESLA_REGION` (na default), `APP_URL`
+`TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD` (12+ chars), `DATABASE_URL`
+(Supabase session pooler string), `SECRET_KEY` (Render Generate; changing it loses the Tesla
+sign-in and the car key, so the car must be paired again). Optional: `TESLA_VIN` (pick a car), `TESLA_REGION` (na default), `APP_URL`
 (defaults to Render's RENDER_EXTERNAL_URL).
 
 Tesla developer app (developer.tesla.com) must have: allowed origin = app URL, redirect URI =
@@ -61,15 +68,19 @@ payment method and a billing limit above $0 (default $0 disables the app).
 
 ## Run / test / ship
 - Local: `pip install -r requirements.txt` then
-  `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
-  and `python tests/smoke_flow.py` (30 checks: connector OAuth, tools, confirmation codes, owner
-  pages, host check). Add `DATABASE_URL=postgresql://...` to test the Postgres path.
+  `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y SECRET_KEY=test TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
+  and `python tests/smoke_flow.py` (41 checks: connector OAuth, redirect allow-list, tools,
+  approvals, owner pages, headers, host check, disconnect). Add `DATABASE_URL=postgresql://...`
+  to test the Postgres path. `python tests/fake_tesla.py` checks the Tesla side against a fake
+  Fleet API (token refresh, wake, refusals, signed switch, window location, encryption).
 - Ship: push `main`; Render auto-deploys (service buddy-ev-monitor, MY APPS workspace, free).
 
 ## Free-plan limits
 - Sleeps after 15 min idle; first request takes about a minute (Claude may need a retry).
 - No background jobs (no alerts). Supabase free pauses after ~7 days without use: restore it
-  in Supabase; the owner page says "Can't reach the database" meanwhile.
+  in Supabase; the owner page says "Can't reach the database" meanwhile. Paused past 90 days =
+  data gone (sign in to Tesla and pair the car again). Tesla refresh tokens also lapse after
+  ~3 months unused. A keep-alive that hits `/healthz?db=1` every few days avoids both pauses.
 
 ## Decisions
 - 2026-11-15 — Rebuilt in Python, not the old Node: `tesla-fleet-api` signs vehicle commands
@@ -80,7 +91,16 @@ payment method and a billing limit above $0 (default $0 disables the app).
   Render free has no disk and Tesla refresh tokens rotate, so they must live in a database.
 - 2026-11-15 — Connector protected by our own OAuth + owner password. Reason: only Steve may use
   it; Claude custom connectors support OAuth with dynamic registration.
-- 2026-11-15 — Confirmation codes for unlock/trunk/frunk/vent/remote start. Reason: Steve's rule.
+- 2026-11-15 — Unlock/trunk/frunk/vent/remote start need the owner to tap Approve on the app's
+  own page (signed in), not a code Claude repeats back. Reason: Steve's confirmation rule; a code
+  in the chat could be replayed by Claude itself if a web page or email tricked it.
+- 2026-11-15 — Table `bem_kv` gets RLS on and no grants for Supabase's anon/authenticated roles,
+  and Tesla tokens + car key are Fernet-encrypted with SECRET_KEY. Reason: second review found
+  Supabase's REST API would otherwise expose the table to anyone with the anon key.
+- 2026-11-15 — Connector redirect allow-list (claude.ai / claude.com callbacks only), 25-client
+  cap, per-address password lockout plus one wrong guess per second overall (the forwarded
+  address can be faked), fixed notice codes, security headers, stateless MCP transport (Render
+  free sleeps). Reason: first and second reviews.
 - 2026-11-15 — Car status on the web page loads only when he taps "Check car". Reason: each
   read costs Tesla API money; don't wake or poll on page load.
 
@@ -88,7 +108,15 @@ payment method and a billing limit above $0 (default $0 disables the app).
 - 2026-11-15 — Moved Tesla monitor code out of Karaoke with history; rewrote as Python MCP
   connector with OAuth, signed commands, Postgres storage, owner setup page, smoke tests.
 
+- 2026-11-15 — Security pass after two independent reviews (see Decisions): owner approvals,
+  RLS + encryption, redirect allow-list, lockout, headers, kill switches, token-rejected refresh,
+  25 s wake, REST-refused switch to signed, window commands send location, key race fix.
+
 ## Open items
+- Signed vehicle sessions are made per command (an extra handshake each time). Caching one per
+  VIN would be faster; not done yet.
+- Two instances overlapping during a deploy each have their own refresh lock; Tesla's 24 h grace
+  on the old refresh token covers the rare clash.
 - Steve: new Tesla developer credentials, then enter env vars; register; sign in with Tesla;
   add key to car; add connector in Claude.
 - Old Tesla public key in Karaoke history is unused now (the app makes a new key).

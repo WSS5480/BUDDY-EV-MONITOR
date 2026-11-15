@@ -5,16 +5,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 import aiohttp
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from tesla_fleet_api import TeslaFleetApi
-from tesla_fleet_api.exceptions import TeslaFleetError, VehicleOffline
+from tesla_fleet_api.exceptions import (
+    InvalidToken,
+    LoginRequired,
+    OAuthExpired,
+    OAuthInvalid,
+    SignedCommandRequired,
+    TeslaFleetError,
+    VehicleOffline,
+)
 
 from . import config
+from .crypt import CannotDecrypt, seal, unseal
 from .store import store
 
 log = logging.getLogger("bem.tesla")
@@ -35,6 +45,10 @@ class CarError(Exception):
 
 
 _refresh_lock = asyncio.Lock()
+_key_lock = asyncio.Lock()
+WAKE_SECONDS = 25  # keep tool calls inside Claude's timeout, even after a cold start
+T = TypeVar("T")
+TOKEN_ERRORS = (InvalidToken, OAuthExpired, OAuthInvalid, LoginRequired)
 _session: aiohttp.ClientSession | None = None
 _private_key: ec.EllipticCurvePrivateKey | None = None
 
@@ -47,21 +61,31 @@ async def load_or_create_key() -> ec.EllipticCurvePrivateKey:
     global _private_key
     if _private_key is not None:
         return _private_key
-    pem = await store.get(K_KEY)
-    if pem:
+    async with _key_lock:
+        if _private_key is not None:
+            return _private_key
+        stored = await store.get(K_KEY)
+        if stored is None:
+            new = ec.generate_private_key(ec.SECP256R1())
+            pem = new.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode()
+            # Insert only if absent, then read back, so two instances never end up with
+            # different keys (the car only knows one).
+            if await store.add(K_KEY, seal(pem)):
+                log.info("Created a new virtual key")
+            stored = await store.get(K_KEY)
+        try:
+            pem = unseal(stored)
+        except CannotDecrypt as e:
+            # Never make a new key here: the car is paired with the old one.
+            raise CarError(f"{e} Put the old SECRET_KEY back in Render.") from None
         key = serialization.load_pem_private_key(pem.encode(), password=None)
         assert isinstance(key, ec.EllipticCurvePrivateKey)
-    else:
-        key = ec.generate_private_key(ec.SECP256R1())
-        pem = key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ).decode()
-        await store.set(K_KEY, pem)
-        log.info("Created a new virtual key")
-    _private_key = key
-    return key
+        _private_key = key
+        return key
 
 
 async def public_key_pem() -> str:
@@ -105,6 +129,16 @@ async def _token_post(data: dict[str, str]) -> dict[str, Any]:
     return body
 
 
+async def _load_tokens() -> dict[str, Any] | None:
+    stored = await store.get(K_TOKENS)
+    if stored is None:
+        return None
+    try:
+        return unseal(stored)
+    except CannotDecrypt as e:
+        raise NotConnected(f"{e} Sign in with Tesla again on the app's home page.") from None
+
+
 async def _save_tokens(body: dict[str, Any], old_refresh: str | None = None) -> dict[str, Any]:
     tokens = {
         "access_token": body["access_token"],
@@ -113,7 +147,17 @@ async def _save_tokens(body: dict[str, Any], old_refresh: str | None = None) -> 
         "expires_at": time.time() + int(body.get("expires_in", 3600)) - 120,
         "saved_at": time.time(),
     }
-    await store.set(K_TOKENS, tokens)
+    # The old refresh token is already spent, so try hard to keep the new one. If every try
+    # fails, Tesla still accepts the old one for 24 hours.
+    for attempt in range(3):
+        try:
+            await store.set(K_TOKENS, seal(tokens))
+            break
+        except Exception:
+            if attempt == 2:
+                log.exception("Couldn't save the new Tesla tokens")
+                raise
+            await asyncio.sleep(1 + attempt)
     return tokens
 
 
@@ -128,18 +172,24 @@ async def exchange_code(code: str) -> None:
             "redirect_uri": config.TESLA_REDIRECT_URI,
         }
     )
+    if not body.get("refresh_token"):
+        raise CarError("Tesla didn't return a refresh token. Allow offline access when signing in.")
     await _save_tokens(body)
 
 
-async def access_token() -> str:
-    tokens = await store.get(K_TOKENS)
+async def access_token(force_refresh: bool = False, rejected: str | None = None) -> str:
+    """Current Tesla access token, refreshed when it's (nearly) expired or Tesla rejected it."""
+    tokens = await _load_tokens()
     if not tokens or not tokens.get("refresh_token"):
         raise NotConnected("Tesla account isn't connected yet. Sign in with Tesla on the app's home page.")
-    if tokens["expires_at"] > time.time():
+    if not force_refresh and tokens["expires_at"] > time.time():
         return tokens["access_token"]
     async with _refresh_lock:
-        tokens = await store.get(K_TOKENS)  # another request may have refreshed already
-        if tokens and tokens["expires_at"] > time.time():
+        tokens = await _load_tokens()  # another request may have refreshed already
+        if not tokens or not tokens.get("refresh_token"):
+            raise NotConnected("Tesla account isn't connected yet. Sign in with Tesla on the app's home page.")
+        fresh = tokens["expires_at"] > time.time() and (not force_refresh or (rejected is not None and tokens["access_token"] != rejected))
+        if fresh:
             return tokens["access_token"]
         try:
             body = await _token_post(
@@ -156,7 +206,10 @@ async def access_token() -> str:
 
 
 async def is_connected() -> bool:
-    tokens = await store.get(K_TOKENS)
+    try:
+        tokens = await _load_tokens()
+    except NotConnected:
+        return False
     return bool(tokens and tokens.get("refresh_token"))
 
 
@@ -215,23 +268,41 @@ async def shutdown() -> None:
         await _session.close()
 
 
-async def _api() -> TeslaFleetApi:
-    token = await access_token()
+async def _api(force_refresh: bool = False, rejected: str | None = None) -> TeslaFleetApi:
+    token = await access_token(force_refresh, rejected)
     assert _session is not None
     api = TeslaFleetApi(session=_session, access_token=token, server=config.TESLA_API_BASE)
     api.private_key = await load_or_create_key()
     return api
 
 
+async def _with_api(work: Callable[[TeslaFleetApi], Awaitable[T]]) -> T:
+    """Run work(api); if Tesla rejects the access token early, refresh once and retry."""
+    api = await _api()
+    used = api._access_token  # the token string this api was built with
+    try:
+        return await work(api)
+    except TOKEN_ERRORS:
+        log.info("Tesla rejected the access token; refreshing")
+    api = await _api(force_refresh=True, rejected=used if isinstance(used, str) else None)
+    try:
+        return await work(api)
+    except TOKEN_ERRORS:
+        raise NotConnected("Tesla sign-in expired, sign in with Tesla again on the app's home page.") from None
+
+
 def _err(e: BaseException) -> CarError:
     msg = getattr(e, "message", None) or str(e) or e.__class__.__name__
+    data = getattr(e, "data", None)
+    detail = (data.get("error_description") or data.get("error")) if isinstance(data, dict) else None
+    if isinstance(detail, str) and detail and detail not in msg:
+        msg = f"{msg} ({detail[:200]})"
     return CarError(f"Tesla said: {msg}")
 
 
 async def list_vehicles() -> list[dict[str, Any]]:
-    api = await _api()
     try:
-        resp = await api.vehicles.list()
+        resp = await _with_api(lambda api: api.vehicles.list())
     except TeslaFleetError as e:
         raise _err(e) from None
     out = []
@@ -265,24 +336,28 @@ async def _needs_signing(api: TeslaFleetApi, vin: str) -> bool:
     cached = await store.get(K_PROTOCOL + vin)
     if cached is not None:
         return bool(cached["signed"])
-    signed = True
     try:
         resp = await api.vehicles.createFleet(vin).fleet_status([vin])
-        info = (resp.get("response", {}).get("vehicle_info") or {}).get(vin) or {}
-        if "vehicle_command_protocol_required" in info:
-            signed = bool(info["vehicle_command_protocol_required"])
+    except TOKEN_ERRORS:
+        raise  # let _with_api refresh the token
     except TeslaFleetError as e:
-        log.warning("fleet_status failed, assuming signed commands: %s", e)
-    await store.set(K_PROTOCOL + vin, {"signed": signed, "checked": time.time()}, ttl=7 * 24 * 3600)
+        log.warning("fleet_status failed, assuming signed commands this time: %s", e)
+        return True  # don't cache a guess
+    info = (resp.get("response", {}).get("vehicle_info") or {}).get(vin) or {}
+    signed = bool(info.get("vehicle_command_protocol_required", True))
+    await _remember_signing(vin, signed)
     return signed
+
+
+async def _remember_signing(vin: str, signed: bool) -> None:
+    await store.set(K_PROTOCOL + vin, {"signed": signed, "checked": time.time()}, ttl=7 * 24 * 3600)
 
 
 async def key_paired(vin: str | None = None) -> bool | None:
     """True/False if Tesla reports whether our key is on the car, None if unknown."""
     try:
-        api = await _api()
         vin = await resolve_vin(vin)
-        resp = await api.vehicles.createFleet(vin).fleet_status([vin])
+        resp = await _with_api(lambda api: api.vehicles.createFleet(vin).fleet_status([vin]))
     except (TeslaFleetError, CarError, NotConnected):
         return None
     r = resp.get("response", {})
@@ -294,12 +369,12 @@ async def key_paired(vin: str | None = None) -> bool | None:
 
 
 async def vehicle_data(vin: str | None) -> dict[str, Any]:
-    api = await _api()
     vin = await resolve_vin(vin)
-    car = api.vehicles.createFleet(vin)
     try:
-        resp = await car.vehicle_data(
-            endpoints=["charge_state", "climate_state", "drive_state", "location_data", "vehicle_state", "vehicle_config"]
+        resp = await _with_api(
+            lambda api: api.vehicles.createFleet(vin).vehicle_data(
+                endpoints=["charge_state", "climate_state", "drive_state", "location_data", "vehicle_state", "vehicle_config"]
+            )
         )
     except VehicleOffline:
         return {"vin": vin, "state": "asleep", "note": "The car is asleep. Wake it to get live data."}
@@ -348,12 +423,14 @@ def _summarize(vin: str, d: dict[str, Any]) -> dict[str, Any]:
 
 
 async def wake(vin: str | None) -> str:
-    api = await _api()
     vin = await resolve_vin(vin)
     try:
-        await api.vehicles.createFleet(vin).wake_up(wait=True, timeout=45)
+        await _with_api(lambda api: api.vehicles.createFleet(vin).wake_up(wait=True, timeout=WAKE_SECONDS))
     except VehicleOffline:
-        return "Sent a wake-up, but the car didn't come online within 45 seconds. It may have no signal."
+        return (
+            f"Sent a wake-up, but the car wasn't online after {WAKE_SECONDS} seconds. "
+            "It usually is within a minute; check again shortly. If not, it may have no signal."
+        )
     except TeslaFleetError as e:
         raise _err(e) from None
     return "The car is awake."
@@ -361,27 +438,59 @@ async def wake(vin: str | None) -> str:
 
 async def command(vin: str | None, name: str, *args: Any, **kwargs: Any) -> str:
     """Run a vehicle command, signed when the car needs it, waking the car once if asleep."""
-    api = await _api()
     vin = await resolve_vin(vin)
+    return await _with_api(lambda api: _command(api, vin, name, args, kwargs))
+
+
+ASLEEP = "The car is asleep and didn't wake up in time. Try again in a minute."
+
+
+async def _command(api: TeslaFleetApi, vin: str, name: str, args: tuple, kwargs: dict) -> str:
     signed = await _needs_signing(api, vin)
-    car = api.vehicles.createSigned(vin) if signed else api.vehicles.createFleet(vin)
-    fn = getattr(car, name)
-    for attempt in (1, 2):
+    woke = False
+    for _ in range(3):
+        car = api.vehicles.createSigned(vin) if signed else api.vehicles.createFleet(vin)
         try:
-            resp = await fn(*args, **kwargs)
+            call_kwargs = dict(kwargs)
+            if name == "window_control" and not signed:
+                # The plain REST call needs the car's location to vent or close windows.
+                call_kwargs.update(await _location(api, vin))
+            resp = await getattr(car, name)(*args, **call_kwargs)
             break
+        except TOKEN_ERRORS:
+            raise  # _with_api refreshes and retries
         except VehicleOffline:
-            if attempt == 2:
-                raise CarError("The car is asleep and didn't wake up in time. Try again in a minute.") from None
+            if woke:
+                raise CarError(ASLEEP) from None
+            woke = True
             try:
-                await api.vehicles.createFleet(vin).wake_up(wait=True, timeout=45)
+                await api.vehicles.createFleet(vin).wake_up(wait=True, timeout=WAKE_SECONDS)
             except VehicleOffline:
-                raise CarError("The car is asleep and didn't wake up in time. Try again in a minute.") from None
-            except TeslaFleetError as e:
-                raise _err(e) from None
+                raise CarError(ASLEEP) from None
         except TeslaFleetError as e:
-            raise _err(e) from None
+            needs_key = isinstance(e, SignedCommandRequired) or _protocol_required(e)
+            if not needs_key:
+                raise _err(e) from None
+            if signed:
+                raise CarError("Tesla says this command needs the car key. Add the key to the car first.") from None
+            signed = True  # the plain REST call was refused: switch to signed and remember it
+            await _remember_signing(vin, True)
+    else:
+        raise CarError("Tesla kept refusing that command. Try again later.")
     r = resp.get("response") if isinstance(resp, dict) else None
     if isinstance(r, dict) and r.get("result") is False:
         raise CarError(f"The car refused: {r.get('reason') or 'no reason given'}")
     return "Done."
+
+
+def _protocol_required(e: BaseException) -> bool:
+    text = f"{getattr(e, 'message', '')} {e} {getattr(e, 'data', '')}".lower()
+    return "command protocol" in text
+
+
+async def _location(api: TeslaFleetApi, vin: str) -> dict[str, float]:
+    resp = await api.vehicles.createFleet(vin).vehicle_data(endpoints=["location_data", "drive_state"])
+    dr = (resp.get("response") or {}).get("drive_state") or {}
+    if dr.get("latitude") is None or dr.get("longitude") is None:
+        raise CarError("Couldn't read the car's location, which Tesla needs for window commands on this car.")
+    return {"lat": dr["latitude"], "lon": dr["longitude"]}

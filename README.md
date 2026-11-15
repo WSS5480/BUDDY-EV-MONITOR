@@ -6,11 +6,13 @@ the Tesla sign-in and the car key.
 
 Claude can read battery, range, charging, locks, climate and location, and can lock, set climate
 and temperature, start/stop charging, set the charge limit, honk and flash. Unlocking, opening the
-trunk or frunk, venting windows and remote start always need your yes first.
+trunk or frunk, venting windows and remote start always need your approval: Claude gives you a
+link, and nothing happens until you tap Approve on this app's page.
 
 ## Setup
 1. Render → this service → Environment: add `TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`,
-   `OWNER_PASSWORD` (pick one) and `DATABASE_URL` (Supabase → Connect → Session pooler).
+   `OWNER_PASSWORD` (pick one, 12+ characters), `DATABASE_URL` (Supabase → Connect → Session
+   pooler) and `SECRET_KEY` (press Generate; keep it, changing it means signing in to Tesla again).
 2. Tesla developer app: allowed origin = the app URL, redirect URI = `<app URL>/auth/callback`,
    turn on vehicle commands, charging commands and location; add a payment method and a billing
    limit above $0.

@@ -1,8 +1,9 @@
 """End-to-end smoke test of the connector sign-in and the tools, without a real Tesla.
 
 Start the app first:
-  APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_VIN=TESTVIN123 \
-  SQLITE_PATH=/tmp/bem-test.db uvicorn app.main:app --port 8765
+  APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y \
+  SECRET_KEY=test-secret TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem-test.db \
+  uvicorn app.main:app --port 8765
 Then: python tests/smoke_flow.py
 """
 
@@ -30,6 +31,15 @@ def check(name, cond, extra=""):
 
 c = httpx.Client(base_url=B, follow_redirects=False, timeout=30)
 
+# 0. only Claude's callback (or localhost in dev) may register
+r = c.post("/register", json={"redirect_uris": ["https://evil.example.com/cb"], "client_name": "x",
+                               "token_endpoint_auth_method": "none"})
+check("foreign redirect URI refused at registration", r.status_code == 400, r.text)
+r = c.get("/healthz")
+check("security headers set", r.headers.get("x-frame-options") == "DENY"
+      and "frame-ancestors 'none'" in r.headers.get("content-security-policy", "")
+      and r.headers.get("referrer-policy") == "no-referrer", str(r.headers))
+
 # 1. dynamic client registration (what Claude does)
 r = c.post("/register", json={"redirect_uris": [REDIRECT], "client_name": "Claude", "token_endpoint_auth_method": "none",
                                "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
@@ -46,11 +56,12 @@ check("authorize redirects to /connect", r.status_code in (302, 303, 307) and "/
 req = parse_qs(urlparse(r.headers["location"]).query)["req"][0]
 
 r = c.get("/connect", params={"req": req})
-check("connect page shows", r.status_code == 200 and "Owner password" in r.text)
+check("connect page shows client and return host", r.status_code == 200 and "Owner password" in r.text
+      and "Claude" in r.text and "localhost" in r.text)
 
 # 3. wrong password rejected, right one gives a code
 r = c.post("/connect", data={"req": req, "password": "nope"})
-check("wrong password rejected", r.status_code == 401)
+check("wrong password rejected, page still names the client", r.status_code == 401 and "Claude" in r.text)
 r = c.post("/connect", data={"req": req, "password": PW})
 loc = r.headers.get("location", "")
 check("right password redirects back with code", r.status_code == 303 and loc.startswith(REDIRECT) and "code=" in loc, r.text)
@@ -120,17 +131,42 @@ def call(name, args, rid):
 
 out = call("vehicle_status", {}, 3)
 check("status says not connected", "isn't connected" in out, out)
+# owner (separate browser) for approvals
+o = httpx.Client(base_url=B, follow_redirects=False, timeout=30)
+r = o.post("/login", data={"password": PW})
+o.cookies.set("bem_session", r.cookies.get("bem_session"))
+
+
+def approval_id(text):
+    return text.split('approval_id="')[1].split('"')[0]
+
+
 out = call("unlock_doors", {}, 4)
-check("unlock asks for confirmation", "CONFIRMATION NEEDED" in out and "confirm_code" in out, out)
-code4 = out.split('confirm_code="')[1][:4]
-out = call("unlock_doors", {"confirm_code": "0000" if code4 != "0000" else "1111"}, 5)
-check("wrong confirm code refused", "wrong or expired" in out, out)
-out = call("unlock_doors", {}, 6)
-code6 = out.split('confirm_code="')[1][:4]
-out = call("unlock_doors", {"confirm_code": code6}, 7)
-check("right code proceeds to Tesla (not connected here)", "isn't connected" in out, out)
-out = call("unlock_doors", {"confirm_code": code6}, 8)
-check("confirm code is single use", "wrong or expired" in out, out)
+check("unlock asks for owner approval", "APPROVAL NEEDED" in out and "/approve?id=" in out, out)
+aid = approval_id(out)
+out = call("unlock_doors", {"approval_id": aid}, 5)
+check("not approved yet: nothing done", "Not approved yet" in out, out)
+out = call("unlock_doors", {"approval_id": "made-up"}, 6)
+check("made-up approval refused", "wrong or expired" in out, out)
+out = call("open_frunk", {"approval_id": aid}, 7)
+check("approval only works for its own action", "wrong or expired" in out, out)
+r = c.post("/approve", data={"id": aid, "decision": "approve"})
+check("approving needs the owner session", r.status_code == 303 and r.headers["location"] == "/")
+r = c.get("/approve", params={"id": aid})
+check("approval page asks non-owner to sign in", r.status_code == 200 and "Sign in to approve" in r.text)
+r = o.get("/approve", params={"id": aid})
+check("owner sees what Claude asked", r.status_code == 200 and "Unlock the car" in r.text)
+r = o.post("/approve", data={"id": aid, "decision": "approve"})
+check("owner approves", r.status_code == 200 and "Approved" in r.text)
+out = call("unlock_doors", {"approval_id": aid}, 8)
+check("approved: proceeds to Tesla (not connected here)", "isn't connected" in out, out)
+out = call("unlock_doors", {"approval_id": aid}, 9)
+check("approval is single use", "wrong or expired" in out, out)
+out = call("remote_start", {}, 10)
+aid2 = approval_id(out)
+o.post("/approve", data={"id": aid2, "decision": "deny"})
+out = call("remote_start", {"approval_id": aid2}, 11)
+check("denied approval does nothing", "denied" in out, out)
 out = call("set_charge_limit", {"percent": 30}, 9)
 check("charge limit range checked", "between 50 and 100" in out, out)
 
@@ -147,10 +183,20 @@ check("dashboard shows setup", r.status_code == 200 and "Setup" in r.text and "/
 r = c.get("/auth/login")
 check("Tesla sign-in redirects to Tesla", r.status_code == 303 and r.headers["location"].startswith("https://auth.tesla.com/"), r.headers.get("location"))
 r = c.get("/auth/callback", params={"state": "forged", "code": "x"})
-check("forged Tesla state refused", r.status_code == 303 and "expired" in r.headers["location"])
+check("forged Tesla state refused", r.status_code == 303 and "tesla_expired" in r.headers["location"])
+r = c.get("/", params={"m": "<b>Call 555 now</b>"})
+check("page doesn't echo arbitrary notice text", "555" not in r.text)
+r = c.post("/login", data={"password": PW, "next": "https://evil.example.com/"})
+check("login won't redirect off-site", r.headers.get("location") == "/", r.headers.get("location"))
 
 r = httpx.post(f"{B}/mcp", headers={**H, "Host": "evil.example.com"}, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
 check("foreign Host header refused", r.status_code in (400, 421), str(r.status_code))
+
+# 8. owner can cut Claude off
+r = c.post("/setup/disconnect-claude")
+check("disconnect Claude", r.status_code == 303 and "claude_disconnected" in r.headers["location"])
+r = c.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 99, "method": "ping"})
+check("old Claude token stops working", r.status_code == 401, str(r.status_code))
 
 print("\nFAILED:" if fails else "\nALL PASSED", fails or "")
 sys.exit(1 if fails else 0)
