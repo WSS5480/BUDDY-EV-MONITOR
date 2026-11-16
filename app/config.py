@@ -37,7 +37,7 @@ TESLA_SCOPES = "openid offline_access user_data vehicle_device_data vehicle_loca
 CONNECTOR_SCOPE = "car"
 CONNECTOR_ACCESS_TTL = 60 * 60  # 1 hour
 CONNECTOR_REFRESH_TTL = 60 * 60 * 24 * 90  # 90 days
-APPROVAL_TTL = 10 * 60  # owner approvals for unlock-type actions
+APPROVAL_TTL = 10 * 60  # owner approvals for vent windows / remote start
 MIN_PASSWORD_LEN = 12
 
 

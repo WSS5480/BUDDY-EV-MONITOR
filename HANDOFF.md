@@ -48,7 +48,7 @@ Update this file **in the same commit as every change**: change log, decisions, 
 - `/.well-known/appspecific/com.tesla.3p.public-key.pem` public virtual key.
 - `/mcp` the connector (Bearer token from our OAuth). `/authorize`, `/token`, `/register`,
   `/revoke`, `/.well-known/oauth-*` from the SDK. `/connect` owner password page during connect.
-- `/approve?id=` owner approves/denies an unlock-type action (needs owner sign-in).
+- `/approve?id=` owner approves/denies a vent-windows or remote-start action (needs owner sign-in).
 - `/setup/disconnect-claude`, `/setup/signout-all` (POST) owner kill switches.
 - `/setup/clear-pause` (POST) owner lifts the sign-in pause and per-address lockouts.
 - `/healthz` (`?db=1` also touches the database: used by the keep-alive).
@@ -166,12 +166,13 @@ payment method and a billing limit above $0 (default $0 disables the app).
 - 2026-11-15 — Live: Steve registered, signed in with Tesla, paired the car and added the
   connector in Claude (second try, after a cold start). vehicle_status from Claude returned real
   data (online, 96%, locked). No commands tested on the car yet.
+- 2026-11-16 — unlock_doors, open_trunk and open_frunk run on Steve's command with no approval
+  link (logged); vent_windows and remote_start keep the approval tap; connector instructions to
+  Claude updated to match; smoke test updated.
 
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,
   `DELETE FROM bem_kv WHERE k LIKE 'web:fails%';` then sign in.
-- 2026-11-16 — unlock_doors, open_trunk and open_frunk run on Steve's command with no approval
-  link (logged); vent_windows and remote_start keep the approval tap; smoke test updated.
 
 ## Open items
 - Confirm on Render which header carries the real client address: look for "Wrong owner
