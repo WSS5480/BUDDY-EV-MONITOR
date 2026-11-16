@@ -5,9 +5,9 @@ custom connector (remote MCP server) on Render's free plan, with a free Supabase
 the Tesla sign-in and the car key.
 
 Claude can read battery, range, charging, locks, climate and location, and can lock, set climate
-and temperature, start/stop charging, set the charge limit, honk and flash. It also unlocks and
-opens the trunk or frunk when you ask it to. Venting the windows and remote start need your
-approval: Claude gives you a link, and nothing happens until you tap Approve on this app's page.
+and temperature, start/stop charging, set the charge limit, honk and flash. It also unlocks, opens
+the trunk or frunk, vents the windows and turns on keyless driving when you ask it to, with no
+extra approval step. Only you can connect Claude to the app (owner password).
 
 ## Setup
 1. Render → this service → Environment: add `TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`,

@@ -5,8 +5,8 @@ project. Use Supabase's *session pooler* connection string (IPv4). Local dev / n
 a SQLite file, which on Render free is wiped on every restart (the status page warns about it).
 
 Everything the app must remember lives here: the Tesla refresh token (single-use, rotates),
-the virtual-key private key, Claude connector OAuth clients/tokens, owner web sessions and
-pending approvals. Secrets (Tesla tokens, the private key) are encrypted with
+the virtual-key private key, Claude connector OAuth clients/tokens, owner web sessions.
+Secrets (Tesla tokens, the private key) are encrypted with
 SECRET_KEY before they get here.
 """
 

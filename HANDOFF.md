@@ -17,8 +17,8 @@ Update this file **in the same commit as every change**: change log, decisions, 
   reviewers don't push code themselves (they report, the coder verifies and pushes).
 - UI: wrap info (cards, no sideways tables), headers over their data, summary tiles drill down
   with a back button, phone first.
-- Unlock, trunk and frunk run on Steve's command with no approval tap (his decision 2026-11-16,
-  see Decisions). Vent windows and remote start still need the owner approval link.
+- Every car command runs on Steve's command with no approval tap (his decision 2026-11-16, see
+  Decisions). The approval page was removed.
 - Keep the Karaoke repo (WSS5480/Karaoke) and its Render service untouched. This app's code
   started there in Aug 2026 and was moved out with its history on Nov 15 2026.
 
@@ -34,8 +34,8 @@ Update this file **in the same commit as every change**: change log, decisions, 
     Vehicle Command protocol, else plain REST; checked with fleet_status, cached a week).
   - `app/store.py` — key-value table `bem_kv` in Postgres (DATABASE_URL) or a SQLite file when no
     DATABASE_URL (local only; on Render free that's wiped on restart).
-  - `app/pages.py` — owner pages (sign-in, setup checklist, car tiles that drill down, approval
-    page, security buttons).
+  - `app/pages.py` — owner pages (sign-in, setup checklist, car tiles that drill down,
+    security buttons).
   - `app/crypt.py` — Fernet encryption (key from SECRET_KEY) for the Tesla tokens and car key.
 - Tesla's library errors subclass **BaseException**, not Exception: catch `TeslaFleetError`.
 - tesla-fleet-api 1.23.1 (pinned): the car list is `api.products()` (GET /api/1/products, filter
@@ -48,7 +48,6 @@ Update this file **in the same commit as every change**: change log, decisions, 
 - `/.well-known/appspecific/com.tesla.3p.public-key.pem` public virtual key.
 - `/mcp` the connector (Bearer token from our OAuth). `/authorize`, `/token`, `/register`,
   `/revoke`, `/.well-known/oauth-*` from the SDK. `/connect` owner password page during connect.
-- `/approve?id=` owner approves/denies a vent-windows or remote-start action (needs owner sign-in).
 - `/setup/disconnect-claude`, `/setup/signout-all` (POST) owner kill switches.
 - `/setup/clear-pause` (POST) owner lifts the sign-in pause and per-address lockouts.
 - `/healthz` (`?db=1` also touches the database: used by the keep-alive).
@@ -56,9 +55,8 @@ Update this file **in the same commit as every change**: change log, decisions, 
 ### Tools
 Read: list_vehicles, vehicle_status. Actions: wake_vehicle, lock_doors, climate_on/off,
 set_temperature (F), start/stop_charging, set_charge_limit, honk_horn, flash_lights,
-close_windows, unlock_doors, open_trunk, open_frunk (these three are logged as "Open-the-car
-command" warnings). Need owner approval (first call returns an /approve link, owner taps Approve
-on the site, second call passes approval_id): vent_windows, remote_start.
+close_windows, unlock_doors, open_trunk, open_frunk, vent_windows, remote_start (the last five
+are logged as "Open-the-car command" warnings). No tool needs an approval step.
 
 ## Settings (Render → Environment)
 `TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD` (12+ chars; shorter = sign-in
@@ -74,8 +72,8 @@ payment method and a billing limit above $0 (default $0 disables the app).
 ## Run / test / ship
 - Local: `pip install -r requirements.txt` then
   `APP_URL=http://localhost:8765 OWNER_PASSWORD=testpass-long-1 TESLA_CLIENT_ID=x TESLA_CLIENT_SECRET=y SECRET_KEY=test TESLA_VIN=TESTVIN123 SQLITE_PATH=/tmp/bem.db uvicorn app.main:app --port 8765`
-  and `python tests/smoke_flow.py` (54 checks: connector OAuth, redirect allow-list, tools,
-  approvals, owner pages, headers, cross-site POSTs, VIN check, host check, disconnect,
+  and `python tests/smoke_flow.py` (connector OAuth, redirect allow-list, tools,
+  no approval links, owner pages, headers, cross-site POSTs, VIN check, host check, disconnect,
   app-wide password cap and the owner clearing it; run it on a fresh DB). Add `DATABASE_URL=postgresql://...`
   to test the Postgres path. `python tests/fake_tesla.py` checks the Tesla side against a fake
   Fleet API (token refresh, wake, refusals, signed switch, window location, encryption, car list
@@ -115,6 +113,13 @@ payment method and a billing limit above $0 (default $0 disables the app).
   tool text telling Claude to act only on the owner's own request, and the approval tap for vent
   windows and remote start (he didn't name those). To bring the tap back, restore the `_approval`
   call in those three tools (see git history before this change).
+- 2026-11-16 (later) — Every car command runs with no approval tap, vent_windows and remote_start
+  included; the approval code and /approve page were removed. Reason: Steve's own request ("All
+  commands for my car no longer need tap."), having already accepted that anyone who gets into
+  his Claude account could then open or start the car. Kept: owner password on the connector, a
+  log line for each open/start command, and tool text telling Claude to act only on the owner's
+  own request. To bring approvals back, restore `_approval` and the /approve route from commit
+  1f8c2b7.
 - 2026-11-15 — Table `bem_kv` gets RLS on and no grants for Supabase's anon/authenticated roles,
   and Tesla tokens + car key are Fernet-encrypted with SECRET_KEY. Reason: second review found
   Supabase's REST API would otherwise expose the table to anyone with the anon key.
@@ -169,6 +174,9 @@ payment method and a billing limit above $0 (default $0 disables the app).
 - 2026-11-16 — unlock_doors, open_trunk and open_frunk run on Steve's command with no approval
   link (logged); vent_windows and remote_start keep the approval tap; connector instructions to
   Claude updated to match; smoke test updated.
+- 2026-11-16 — vent_windows and remote_start no longer need approval either; approval code and
+  the /approve page removed; connector instructions and smoke test updated.
+  Independent review passed with no blockers; two stale "approval" comments tidied after it.
 
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,

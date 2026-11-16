@@ -131,48 +131,16 @@ def call(name, args, rid):
 
 out = call("vehicle_status", {}, 3)
 check("status says not connected", "isn't connected" in out, out)
-# owner (separate browser) for approvals
-o = httpx.Client(base_url=B, follow_redirects=False, timeout=30)
-r = o.post("/login", data={"password": PW})
-o.cookies.set("bem_session", r.cookies.get("bem_session"))
-
-
-def approval_id(text):
-    return text.split('approval_id="')[1].split('"')[0]
-
-
-# unlock / trunk / frunk run on the owner's command (no approval link); decided 2026-11-16
-for n, (tool, rid) in enumerate((("unlock_doors", 4), ("open_trunk", 5), ("open_frunk", 6))):
+# every car command runs on the owner's command (no approval link); decided 2026-11-16
+for tool, rid in (("unlock_doors", 4), ("open_trunk", 5), ("open_frunk", 6), ("vent_windows", 7), ("remote_start", 8)):
     out = call(tool, {}, rid)
     check(f"{tool} runs with no approval link", "APPROVAL" not in out and "/approve" not in out
           and "isn't connected" in out, out)
-# vent and remote start still need the owner's approval tap
-out = call("vent_windows", {}, 7)
-check("vent asks for owner approval", "APPROVAL NEEDED" in out and "/approve?id=" in out, out)
-aid = approval_id(out)
-out = call("vent_windows", {"approval_id": aid}, 41)
-check("not approved yet: nothing done", "Not approved yet" in out, out)
-out = call("vent_windows", {"approval_id": "made-up"}, 42)
-check("made-up approval refused", "wrong or expired" in out, out)
-out = call("remote_start", {"approval_id": aid}, 43)
-check("approval only works for its own action", "wrong or expired" in out, out)
-r = c.post("/approve", data={"id": aid, "decision": "approve"})
-check("approving needs the owner session", r.status_code == 303 and r.headers["location"] == "/")
-r = c.get("/approve", params={"id": aid})
-check("approval page asks non-owner to sign in", r.status_code == 200 and "Sign in to approve" in r.text)
-r = o.get("/approve", params={"id": aid})
-check("owner sees what Claude asked", r.status_code == 200 and "Vent" in r.text)
-r = o.post("/approve", data={"id": aid, "decision": "approve"})
-check("owner approves", r.status_code == 200 and "Approved" in r.text)
-out = call("vent_windows", {"approval_id": aid}, 8)
-check("approved: proceeds to Tesla (not connected here)", "isn't connected" in out, out)
-out = call("vent_windows", {"approval_id": aid}, 9)
-check("approval is single use", "wrong or expired" in out, out)
-out = call("remote_start", {}, 10)
-aid2 = approval_id(out)
-o.post("/approve", data={"id": aid2, "decision": "deny"})
-out = call("remote_start", {"approval_id": aid2}, 11)
-check("denied approval does nothing", "denied" in out, out)
+r = rpc("tools/list", {}, 20)[1]
+schemas = {t["name"]: t.get("inputSchema", {}).get("properties", {}) for t in r["result"]["tools"]}
+check("no tool takes an approval_id any more", not any("approval_id" in p for p in schemas.values()), str(schemas))
+r = c.get("/approve", params={"id": "x"})
+check("approval page is gone", r.status_code == 404, str(r.status_code))
 out = call("set_charge_limit", {"percent": 30}, 9)
 check("charge limit range checked", "between 50 and 100" in out, out)
 

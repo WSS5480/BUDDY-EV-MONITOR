@@ -41,14 +41,14 @@ def _msg(msg: str) -> str:
     return f"<div class=msg>{escape(msg)}</div>" if msg else ""
 
 
-def login_page(locked: bool = False, msg: str = "", next_url: str = "/", short_pw: bool = False) -> str:
+def login_page(locked: bool = False, msg: str = "", short_pw: bool = False) -> str:
     note = "<p class=muted>Too many wrong tries. Sign-in is paused for up to an hour.</p>" if locked else ""
     if short_pw:
         note += "<p style='color:var(--bad)'>Sign-in is off: OWNER_PASSWORD in Render must be at least 12 characters.</p>"
     return _page(
         "Buddy EV Monitor",
         f"<h1>Buddy EV Monitor</h1>{_msg(msg)}<div class=card><h2>Owner sign-in</h2>{note}"
-        f"<form method=post action=/login><input type=hidden name=next value='{escape(next_url)}'>"
+        "<form method=post action=/login>"
         "<input type=password name=password placeholder='Owner password' "
         "autocomplete=current-password required autofocus><button>Sign in</button></form></div>",
     )
@@ -67,7 +67,7 @@ def connect_page(
         "Connect Claude to your Tesla",
         "<h1>Connect Claude to your Tesla</h1><div class=card>"
         f"<p><b>{escape(client_name)}</b> is asking to check and control your car through Buddy EV Monitor. "
-        "It can unlock the car and open the trunk when you ask. Venting the windows or starting the car will still need your approval on this site.</p>"
+        "It can unlock, open and start the car when you ask, with no extra approval step.</p>"
         f"<p class=muted>It will send you back to <b>{escape(host)}</b>. Only allow this if you just "
         "added the connector in Claude yourself.</p>"
         f"{err}{'' if owner else note}<form method=post action=/connect><input type=hidden name=req value='{escape(req_id)}'>"
@@ -77,19 +77,6 @@ def connect_page(
             else "<input type=password name=password placeholder='Owner password' autocomplete=current-password required autofocus>"
         )
         + "<button>Allow</button></form></div>",
-    )
-
-
-def approve_page(approval_id: str, what: str, vin: str) -> str:
-    return _page(
-        "Approve car action",
-        "<h1>Approve car action</h1><div class=card>"
-        f"<p>Claude asked to: <b>{escape(what)}</b></p><p class=muted>Car {escape(vin)}. "
-        "Only approve if you asked Claude for this just now.</p>"
-        f"<form method=post action=/approve style='display:inline'><input type=hidden name=id value='{escape(approval_id)}'>"
-        "<input type=hidden name=decision value=approve><button>Approve</button></form> "
-        f"<form method=post action=/approve style='display:inline'><input type=hidden name=id value='{escape(approval_id)}'>"
-        "<input type=hidden name=decision value=deny><button class='btn btn2'>Deny</button></form></div>",
     )
 
 
