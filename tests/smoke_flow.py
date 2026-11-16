@@ -141,26 +141,32 @@ def approval_id(text):
     return text.split('approval_id="')[1].split('"')[0]
 
 
-out = call("unlock_doors", {}, 4)
-check("unlock asks for owner approval", "APPROVAL NEEDED" in out and "/approve?id=" in out, out)
+# unlock / trunk / frunk run on the owner's command (no approval link); decided 2026-11-16
+for n, (tool, rid) in enumerate((("unlock_doors", 4), ("open_trunk", 5), ("open_frunk", 6))):
+    out = call(tool, {}, rid)
+    check(f"{tool} runs with no approval link", "APPROVAL" not in out and "/approve" not in out
+          and "isn't connected" in out, out)
+# vent and remote start still need the owner's approval tap
+out = call("vent_windows", {}, 7)
+check("vent asks for owner approval", "APPROVAL NEEDED" in out and "/approve?id=" in out, out)
 aid = approval_id(out)
-out = call("unlock_doors", {"approval_id": aid}, 5)
+out = call("vent_windows", {"approval_id": aid}, 5)
 check("not approved yet: nothing done", "Not approved yet" in out, out)
-out = call("unlock_doors", {"approval_id": "made-up"}, 6)
+out = call("vent_windows", {"approval_id": "made-up"}, 6)
 check("made-up approval refused", "wrong or expired" in out, out)
-out = call("open_frunk", {"approval_id": aid}, 7)
+out = call("remote_start", {"approval_id": aid}, 7)
 check("approval only works for its own action", "wrong or expired" in out, out)
 r = c.post("/approve", data={"id": aid, "decision": "approve"})
 check("approving needs the owner session", r.status_code == 303 and r.headers["location"] == "/")
 r = c.get("/approve", params={"id": aid})
 check("approval page asks non-owner to sign in", r.status_code == 200 and "Sign in to approve" in r.text)
 r = o.get("/approve", params={"id": aid})
-check("owner sees what Claude asked", r.status_code == 200 and "Unlock the car" in r.text)
+check("owner sees what Claude asked", r.status_code == 200 and "Vent" in r.text)
 r = o.post("/approve", data={"id": aid, "decision": "approve"})
 check("owner approves", r.status_code == 200 and "Approved" in r.text)
-out = call("unlock_doors", {"approval_id": aid}, 8)
+out = call("vent_windows", {"approval_id": aid}, 8)
 check("approved: proceeds to Tesla (not connected here)", "isn't connected" in out, out)
-out = call("unlock_doors", {"approval_id": aid}, 9)
+out = call("vent_windows", {"approval_id": aid}, 9)
 check("approval is single use", "wrong or expired" in out, out)
 out = call("remote_start", {}, 10)
 aid2 = approval_id(out)

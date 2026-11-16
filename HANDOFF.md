@@ -17,8 +17,8 @@ Update this file **in the same commit as every change**: change log, decisions, 
   reviewers don't push code themselves (they report, the coder verifies and pushes).
 - UI: wrap info (cards, no sideways tables), headers over their data, summary tiles drill down
   with a back button, phone first.
-- Anything that unlocks, opens or starts the car needs an explicit confirmation step (done as an
-  owner approval link, see Decisions).
+- Unlock, trunk and frunk run on Steve's command with no approval tap (his decision 2026-11-16,
+  see Decisions). Vent windows and remote start still need the owner approval link.
 - Keep the Karaoke repo (WSS5480/Karaoke) and its Render service untouched. This app's code
   started there in Aug 2026 and was moved out with its history on Nov 15 2026.
 
@@ -56,9 +56,9 @@ Update this file **in the same commit as every change**: change log, decisions, 
 ### Tools
 Read: list_vehicles, vehicle_status. Actions: wake_vehicle, lock_doors, climate_on/off,
 set_temperature (F), start/stop_charging, set_charge_limit, honk_horn, flash_lights,
-close_windows. Need owner approval (first call returns an /approve link, owner taps Approve on
-the site, second call passes approval_id): unlock_doors, open_trunk, open_frunk, vent_windows,
-remote_start.
+close_windows, unlock_doors, open_trunk, open_frunk (these three are logged as "Open-the-car
+command" warnings). Need owner approval (first call returns an /approve link, owner taps Approve
+on the site, second call passes approval_id): vent_windows, remote_start.
 
 ## Settings (Render → Environment)
 `TESLA_CLIENT_ID`, `TESLA_CLIENT_SECRET`, `OWNER_PASSWORD` (12+ chars; shorter = sign-in
@@ -108,6 +108,13 @@ payment method and a billing limit above $0 (default $0 disables the app).
 - 2026-11-15 — Unlock/trunk/frunk/vent/remote start need the owner to tap Approve on the app's
   own page (signed in), not a code Claude repeats back. Reason: Steve's confirmation rule; a code
   in the chat could be replayed by Claude itself if a web page or email tricked it.
+- 2026-11-16 — Unlock, trunk and frunk no longer need the approval tap; they run when Steve asks
+  Claude. Reason: Steve's own request ("You have my authority to do on my command, open my car."),
+  after being told anyone who gets into his Claude account could then open the car; he answered
+  "Not worried." Kept: owner password on the connector (OAuth), a log line for every open command,
+  tool text telling Claude to act only on the owner's own request, and the approval tap for vent
+  windows and remote start (he didn't name those). To bring the tap back, restore the `_approval`
+  call in those three tools (see git history before this change).
 - 2026-11-15 — Table `bem_kv` gets RLS on and no grants for Supabase's anon/authenticated roles,
   and Tesla tokens + car key are Fernet-encrypted with SECRET_KEY. Reason: second review found
   Supabase's REST API would otherwise expose the table to anyone with the anon key.
@@ -163,6 +170,8 @@ payment method and a billing limit above $0 (default $0 disables the app).
 ## Recovery
 - Locked out of sign-in on a new device with no signed-in device left: in Supabase SQL editor,
   `DELETE FROM bem_kv WHERE k LIKE 'web:fails%';` then sign in.
+- 2026-11-16 — unlock_doors, open_trunk and open_frunk run on Steve's command with no approval
+  link (logged); vent_windows and remote_start keep the approval tap; smoke test updated.
 
 ## Open items
 - Confirm on Render which header carries the real client address: look for "Wrong owner
@@ -174,4 +183,5 @@ payment method and a billing limit above $0 (default $0 disables the app).
   on the old refresh token covers the rare clash.
 - Render settings filled by Steve; DATABASE_URL = Supabase Session pooler string.
 - Old Tesla public key in Karaoke history is unused now (the app makes a new key).
-- Read works on the real car. Next live check: lock_doors, then an approval-gated action.
+- Read works on the real car. Commands not yet tested on the car (don't test unlock/open without
+  Steve asking).

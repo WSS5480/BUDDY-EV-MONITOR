@@ -67,7 +67,7 @@ def connect_page(
         "Connect Claude to your Tesla",
         "<h1>Connect Claude to your Tesla</h1><div class=card>"
         f"<p><b>{escape(client_name)}</b> is asking to check and control your car through Buddy EV Monitor. "
-        "Unlocking, opening or starting the car will still need your approval on this site.</p>"
+        "It can unlock the car and open the trunk when you ask. Venting the windows or starting the car will still need your approval on this site.</p>"
         f"<p class=muted>It will send you back to <b>{escape(host)}</b>. Only allow this if you just "
         "added the connector in Claude yourself.</p>"
         f"{err}{'' if owner else note}<form method=post action=/connect><input type=hidden name=req value='{escape(req_id)}'>"
